@@ -10137,14 +10137,18 @@ fn ui_pointer(a: &mut App, ph: i32, ev: &InEvent, modal: bool) {
         // Also redraw wherever the panel passed through: every place a fast frame drew it, not only
         // where it began and ended (issue #11: a drag that went round left the page between them
         // dithered). In grays, without a flash: drawn in black and white the panel leaves no trace a
-        // grayscale refresh misses, as the dithered gray one did, so the release no longer cleans the
-        // way it went with a flash of half the screen.
-        // shortcut: if a faint trace shows on some panel, owe a clean here again (du_wear_owe).
+        // grayscale refresh misses at once, as the dithered gray one did, so the release no longer cleans
+        // the way it went with a flash of half the screen.
+        // The faint traces a few drags may still leave add up as the eraser's do (display.rs, DuWear): each
+        // drag counts the panel's own area toward the wear, so about every fifth one (a quarter of the
+        // screen) ends in one clean of the way they went, at the next pause, not under the finger.
         let s = ed(a);
         let trail = rect_union(rect_union(s.drag_start_rect, s.drag_trail), s.panel);
+        let worn = s.panel.w as i64 * s.panel.h as i64;
         s.drag_trail = RECT_EMPTY;
         compose(a, trail);
         app_invalidate(a, trail, RefreshMode::Ui);
+        du_wear_add(&mut a.du_wear, trail, worn, now_ms());
         persist_panel(a);
         return;
     }
