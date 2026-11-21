@@ -7700,6 +7700,22 @@ fn bar_rebuild(a: &mut App) {
     app_invalidate(a, u, RefreshMode::Ui);
 }
 
+// A panel drag moves the panel itself at each step, by fast (DU) refreshes, drawn in black and white
+// alone: a fast frame shows a gray as dithered dots (display_fbink.rs), and a gray face moved by a few
+// pixels changes nearly every dot, so the whole panel flickered black at each step. In black and white
+// only the pixels along its moving edges change. The release draws it in grays again (move_panel_to, Ui).
+const DRAG_STEP_MS: u32 = 50;
+
+fn black_and_white(c: &mut Canvas, r: Rect) {
+    let r = rect_intersect(r, Rect::new(0, 0, c.w, c.h));
+    for y in r.y..r.y + r.h {
+        let row = (y * c.stride + r.x) as usize;
+        for p in &mut c.px[row..row + r.w as usize] {
+            *p = if *p < 128 { 0 } else { 255 };
+        }
+    }
+}
+
 fn move_panel_to(a: &mut App, x: i32, y: i32, m: RefreshMode) {
     let old = ed(a).panel;
     ed(a).panel = panel_rect_at(a, x, y);
@@ -10093,10 +10109,12 @@ fn ui_pointer(a: &mut App, ph: i32, ev: &InEvent, modal: bool) {
         press_move(&mut s.press, ev.x, ev.y);
         if draggable && s.press.moved {
             s.dragging = true;
-            if ev.t_ms.wrapping_sub(s.last_drag_paint) > 70 {
+            if ev.t_ms.wrapping_sub(s.last_drag_paint) > DRAG_STEP_MS {
                 s.last_drag_paint = ev.t_ms;
                 let (x, y) = ((ev.x - s.grab_dx) as i32, (ev.y - s.grab_dy) as i32);
                 move_panel_to(a, x, y, RefreshMode::Fast);
+                let p = ed(a).panel;
+                black_and_white(&mut a.screen, p);
                 let s = ed(a);
                 s.drag_trail = rect_union(s.drag_trail, s.panel);
             }
@@ -14893,6 +14911,43 @@ mod tests {
         let top = at(32, 24) * (255 - w) + at(33, 24) * w;
         let bot = at(32, 25) * (255 - w) + at(33, 25) * w;
         assert_eq!(a.screen.px[24 * 64 + 32] as u32, (top * (255 - w) + bot * w + 32512) / 65025);
+    }
+
+    // A drag of the panel's grip moves the panel itself where the finger takes it, drawn in black and
+    // white alone while it moves, and in grays again where it lands on release.
+    #[test]
+    fn a_panel_drag_moves_the_panel_in_black_and_white() {
+        let mut a = app(1860, 2480, 1860, 2480);
+        assert_eq!(canvas_init(&mut ed(&mut a).page_canvas, 1860, 2480), 0);
+        ed(&mut a).zoom = 1.0;
+        fit_panel_to(&a.settings, a.h);
+        let p = panel_rect_at(&a, a.w - pw() - ui_px(28.0), ui_px(220.0));
+        ed(&mut a).panel = p;
+        draw_panel(&mut a);
+        let grip = ed_ref(&a).hits.h.iter().find(|h| h.id == P_GRIP).unwrap().r;
+        let (gx, gy) = ((grip.x + grip.w / 2) as f32, (grip.y + grip.h / 2) as f32);
+        let at = |x: f32, y: f32, t: u32| InEvent { type_: InType::TouchMove, x, y, t_ms: t, k_ms: t, ..Default::default() };
+        let px = |a: &App, r: Rect| -> Vec<u8> {
+            (r.y..r.y + r.h).flat_map(|y| a.screen.px[(y * a.screen.stride + r.x) as usize..][..r.w as usize].to_vec()).collect()
+        };
+        let still = px(&a, p);
+        ui_pointer(&mut a, 0, &at(gx, gy, 1000), false);
+        ui_pointer(&mut a, 1, &at(gx - 400.0, gy + 300.0, 1100), false);
+        let q = ed_ref(&a).panel;
+        assert!(ed_ref(&a).dragging);
+        assert_eq!((q.x, q.y), (p.x - 400, p.y + 300), "the panel itself follows the finger");
+        assert!(px(&a, q).iter().all(|&v| v == 0 || v == 255), "in black and white while it moves");
+        // a step under the step time moves nothing; the release puts it where the finger let go
+        ui_pointer(&mut a, 1, &at(gx - 420.0, gy + 300.0, 1120), false);
+        assert_eq!(ed_ref(&a).panel, q);
+        ui_pointer(&mut a, 2, &at(gx - 450.0, gy + 320.0, 1250), false);
+        let r = ed_ref(&a).panel;
+        assert!(!ed_ref(&a).dragging);
+        assert_eq!((r.x, r.y), (p.x - 450, p.y + 320));
+        let landed = px(&a, r);
+        if still.iter().any(|&v| v != 0 && v != 255) {
+            assert!(landed.iter().any(|&v| v != 0 && v != 255), "its grays come back on release");
+        }
     }
 
     #[test]
