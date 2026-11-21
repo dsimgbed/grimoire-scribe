@@ -10134,22 +10134,17 @@ fn ui_pointer(a: &mut App, ph: i32, ev: &InEvent, modal: bool) {
             ((ev.x - s.grab_dx) as i32, (ev.y - s.grab_dy) as i32)
         };
         move_panel_to(a, x, y, RefreshMode::Ui);
-        // Also clean up wherever the panel passed through: every place a fast frame drew it, not only
+        // Also redraw wherever the panel passed through: every place a fast frame drew it, not only
         // where it began and ended (issue #11: a drag that went round left the page between them
-        // dithered). DU left a trace of the panel at each of those places that a grayscale refresh
-        // does not reach (display.rs, DuWear), so they are cleaned with one flash of the trail alone;
-        // with the pen coming (it cancelled the drag, or it is near) grayscale now, and the clean at
-        // the next pause.
+        // dithered). In grays, without a flash: drawn in black and white the panel leaves no trace a
+        // grayscale refresh misses, as the dithered gray one did, so the release no longer cleans the
+        // way it went with a flash of half the screen.
+        // shortcut: if a faint trace shows on some panel, owe a clean here again (du_wear_owe).
         let s = ed(a);
         let trail = rect_union(rect_union(s.drag_start_rect, s.drag_trail), s.panel);
         s.drag_trail = RECT_EMPTY;
         compose(a, trail);
-        if touch_cancelled(ev) || ed_ref(a).pen_near {
-            app_invalidate(a, trail, RefreshMode::Ui);
-            du_wear_owe(&mut a.du_wear, trail, now_ms());
-        } else {
-            app_invalidate(a, trail, RefreshMode::Clean);
-        }
+        app_invalidate(a, trail, RefreshMode::Ui);
         persist_panel(a);
         return;
     }
