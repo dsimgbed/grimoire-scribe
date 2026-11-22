@@ -1,70 +1,72 @@
-# The Templates and Photos sheets end with a From a file... tile in Rust (2.2, #146): the empty sheets and the page that
-# holds the tile. Only these raster hashes differ; the layouts, page counts and every result keep the C baseline.
-# The tile's label is drawn in each language, so a language's empty-sheet lines follow its "From a file...": when that
-# translation changes, look at the 16 sheets again and record their lines (the ja lines were, when #136 translated it).
-tplsheet empty0 en pg templates 3399a45822c3f285
-tplsheet empty0 en pg photos 7635faf5eedf4d43
-tplsheet empty0 en pc templates 8f0750b27266a6ad
-tplsheet empty0 en pc photos f5095e82bb0cb435
-tplsheet empty0 en lg templates 97b3e62621062a78
+# The Templates and Photos sheets end with a From a file... tile in Rust (2.2, #146), and the Templates sheet also
+# ends with From a notebook... (2.2, #195): the empty sheets and the page that holds the tiles. Only these raster
+# hashes differ; the layouts, page counts and every result keep the C baseline.
+# The tiles' labels are drawn in each language, so a language's empty-sheet lines follow its "From a file...": when
+# that translation changes, look at the 16 sheets again and record their lines (the ja lines were, when #136
+# translated it; the empty sheets were recorded again for #195's tiles and 18-a-page grid).
+tplsheet empty0 en pg templates d2d54c54ac8bf3f0
+tplsheet empty0 en pg photos fe290deb3196fe43
+tplsheet empty0 en pc templates 1a0b3310255e2ab4
+tplsheet empty0 en pc photos c289480f79189675
+tplsheet empty0 en lg templates d611b74cd9a4067a
 tplsheet empty0 en lg photos ea2312be1da935b6
-tplsheet empty0 en lc templates 538a613011ac87aa
+tplsheet empty0 en lc templates fab048a0174e1fd9
 tplsheet empty0 en lc photos bcc9ea14f167dcda
-tplsheet empty0 es pg templates 67386b50731c0607
-tplsheet empty0 es pg photos c8a33ef1f014f8db
-tplsheet empty0 es pc templates 9c010fd3f60fe019
-tplsheet empty0 es pc photos 3ce36937545000a9
-tplsheet empty0 es lg templates 2f898989c3d7df06
+tplsheet empty0 es pg templates c00331f568cefc7a
+tplsheet empty0 es pg photos e7bb4ae46535c6db
+tplsheet empty0 es pc templates 1c2e0d2a2fb707a8
+tplsheet empty0 es pc photos 2019ecafe0912f69
+tplsheet empty0 es lg templates 2632e8e159a24c38
 tplsheet empty0 es lg photos ab4a8dba62126326
-tplsheet empty0 es lc templates 358116d2baba3d22
+tplsheet empty0 es lc templates ddfe22a5b4d76853
 tplsheet empty0 es lc photos 321f3c3da68b5236
-tplsheet empty0 ja pg templates 730768a78a5a9688
-tplsheet empty0 ja pg photos e703c14807c5e929
-tplsheet empty0 ja pc templates 9d8826afb8003acb
-tplsheet empty0 ja pc photos 031d462cb450e0a5
-tplsheet empty0 ja lg templates 783d283f840a332f
+tplsheet empty0 ja pg templates 5e3e91c6422d9829
+tplsheet empty0 ja pg photos 2b56c2b2764afd29
+tplsheet empty0 ja pc templates 0f93f3effdbeffa2
+tplsheet empty0 ja pc photos 09715990c2ffe865
+tplsheet empty0 ja lg templates ec8b8598a1a70a93
 tplsheet empty0 ja lg photos b0450805dbb0b0cc
-tplsheet empty0 ja lc templates 11eb1b764b37ab04
+tplsheet empty0 ja lc templates 4274b3a854ecc381
 tplsheet empty0 ja lc photos 9c47abc1cc453172
-tplsheet empty0 pl pg templates d0cb3868cd80a683
-tplsheet empty0 pl pg photos fbcb85ee7efc71ed
-tplsheet empty0 pl pc templates e46425001435cdf7
-tplsheet empty0 pl pc photos dc9c7d2c8691cbe3
-tplsheet empty0 pl lg templates d7fe5ae20c3f5d52
+tplsheet empty0 pl pg templates dd5d234cbf67fefe
+tplsheet empty0 pl pg photos 9419f6c23ed1926d
+tplsheet empty0 pl pc templates 4c1558190a2385f8
+tplsheet empty0 pl pc photos 944049a4dc13caa3
+tplsheet empty0 pl lg templates 4fa47eeabc251114
 tplsheet empty0 pl lg photos 689f033c3b09c580
-tplsheet empty0 pl lc templates a2396bb24b022baa
+tplsheet empty0 pl lc templates 5e1d3dbb846ab7eb
 tplsheet empty0 pl lc photos 6eed308367ba400e
-tplsheet empty1 en pg templates 07fe1fbf994f9c85
-tplsheet empty1 en pg photos 7635faf5eedf4d43
-tplsheet empty1 en pc templates 1f2c78da83551a1e
-tplsheet empty1 en pc photos f5095e82bb0cb435
-tplsheet empty1 en lg templates c41400270df91878
+tplsheet empty1 en pg templates e963eab281f15df0
+tplsheet empty1 en pg photos fe290deb3196fe43
+tplsheet empty1 en pc templates cb4c25060834c5e7
+tplsheet empty1 en pc photos c289480f79189675
+tplsheet empty1 en lg templates 35ce7f5a16755a7a
 tplsheet empty1 en lg photos ea2312be1da935b6
-tplsheet empty1 en lc templates 1f2528f9153140a5
+tplsheet empty1 en lc templates 778e35f03fe22e66
 tplsheet empty1 en lc photos bcc9ea14f167dcda
-tplsheet empty1 es pg templates 9aea6c8d78910007
-tplsheet empty1 es pg photos c8a33ef1f014f8db
-tplsheet empty1 es pc templates 0117ed74e47ef23b
-tplsheet empty1 es pc photos 3ce36937545000a9
-tplsheet empty1 es lg templates 200423b4922e3506
+tplsheet empty1 es pg templates 1d7fc3d7624a827a
+tplsheet empty1 es pg photos e7bb4ae46535c6db
+tplsheet empty1 es pc templates 8e9be8d4bde11956
+tplsheet empty1 es pc photos 2019ecafe0912f69
+tplsheet empty1 es lg templates 529f36e520595438
 tplsheet empty1 es lg photos ab4a8dba62126326
-tplsheet empty1 es lc templates faa5ff5f59b11ba8
+tplsheet empty1 es lc templates 14ccb19f75b8d881
 tplsheet empty1 es lc photos 321f3c3da68b5236
-tplsheet empty1 ja pg templates 3bcde40541f88c23
-tplsheet empty1 ja pg photos e703c14807c5e929
-tplsheet empty1 ja pc templates 4c7cc5cc36266a94
-tplsheet empty1 ja pc photos 031d462cb450e0a5
-tplsheet empty1 ja lg templates a5d914d61f3e6270
+tplsheet empty1 ja pg templates d9cf2c9680e6f552
+tplsheet empty1 ja pg photos 2b56c2b2764afd29
+tplsheet empty1 ja pc templates cce1b6de96fce611
+tplsheet empty1 ja pc photos 09715990c2ffe865
+tplsheet empty1 ja lg templates d0dfc1934c92ff10
 tplsheet empty1 ja lg photos b0450805dbb0b0cc
-tplsheet empty1 ja lc templates ce189e2c7db83277
+tplsheet empty1 ja lc templates 61bc443e38bf9a02
 tplsheet empty1 ja lc photos 9c47abc1cc453172
-tplsheet empty1 pl pg templates f1865ed006bb914b
-tplsheet empty1 pl pg photos fbcb85ee7efc71ed
-tplsheet empty1 pl pc templates 6f0f609037e1eeab
-tplsheet empty1 pl pc photos dc9c7d2c8691cbe3
-tplsheet empty1 pl lg templates afb699916bba7f3a
+tplsheet empty1 pl pg templates c1cc5ffff506a346
+tplsheet empty1 pl pg photos 9419f6c23ed1926d
+tplsheet empty1 pl pc templates fda5ad83146a88a4
+tplsheet empty1 pl pc photos 944049a4dc13caa3
+tplsheet empty1 pl lg templates bf7d09d080465c5c
 tplsheet empty1 pl lg photos 689f033c3b09c580
-tplsheet empty1 pl lc templates 299b363171fa1e92
+tplsheet empty1 pl lc templates 149ade3c4f0bad73
 tplsheet empty1 pl lc photos 6eed308367ba400e
 tplsheet pg turn 1 -> 1 page 2 7d02ff8031d4fcca
 tplsheet pc turn 1 -> 1 page 2 99db4c77f84e3f5d
