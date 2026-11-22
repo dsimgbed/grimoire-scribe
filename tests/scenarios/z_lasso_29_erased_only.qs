@@ -77,7 +77,8 @@ expect editor.select is armed
 expect editor.selected is 0
 expect toast is Nothing to select.
 expect display.dark.360.850.540.100 is 0
-# round the word white ink covers: the same
+# round the word white ink covers: the same (the last toast gone first, so the one checked is this lasso's)
+waitfor toast is
 pen down 650 1165
 pen move 960 1165
 pen move 960 1040
@@ -89,6 +90,7 @@ expect editor.select is armed
 expect editor.selected is 0
 expect toast is Nothing to select.
 # round empty paper: as before (round white ink alone: z_lasso_1)
+waitfor toast is
 pen down 1300 2000
 pen move 1600 2000
 pen move 1600 2150
