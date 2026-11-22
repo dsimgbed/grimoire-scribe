@@ -231,6 +231,11 @@ expect display.dark.543.866.18.12 not 0
 expect display.dark.360.748.270.50 is 0
 expect display.dark.510.868.20.9 is 0
 expect display.dark.513.944.12.8 is 0
+# black ink scales too: the marker line is half as thick (5 rows of the panel, 10 before the resize), so the rows
+# its kept width would cover either side show nothing
+expect display.dark.400.870.70.5 not 0
+expect display.dark.400.866.70.4 is 0
+expect display.dark.400.875.70.4 is 0
 shot 02-smaller
 # redo puts the resized page back exactly (page_sig hashes each stroke's parameters with its points, so the
 # widths too; the undos above put the page back exactly so)
