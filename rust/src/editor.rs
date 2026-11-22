@@ -9,9 +9,7 @@
 
 use crate::browser::{Browser, BrowserResult, FilesPrefs, PickSpec};
 use crate::prelude::*;
-use std::cell::Cell;
-#[cfg(feature = "sim")]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 // The grayscale settle (see EditorState.settle): this long after a stroke with the pen still near,
@@ -544,7 +542,15 @@ pub struct EditorState {
     pinch_mx0: f32,
     pinch_my0: f32,
     last_pinch_paint: u32,
-    /// the two fingers are a session touchgest classified (PinchBegin.value 1): its moves say zoom (1),
+    /// view last painted on screen during the active pinch (skip redundant paints on commit or at limits)
+    pinch_shown: (f32, f32, f32),
+    /// view when the active pinch began (PinchEnd settles only if the view moved or painted fast frames)
+    pinch_start: (f32, f32, f32),
+    /// whether any fast preview frame was painted during the active pinch
+    pinch_painted: bool,
+    /// nearest-neighbor blit for live pinch / pen-drag DU preview frames
+    fast_blit: bool,
+    /// the two fingers are a session touchgest classified (PinchBegin.value != 0): its moves say zoom (1),
     /// pan (2) or swipe (3); the legacy pinch (the runner's `pinch`) decides itself
     pinch_classified: bool,
     /// The pages the open notebook was left from by a link, the Pages view or Find, newest last, at most
@@ -2036,8 +2042,8 @@ fn zoomed(a: &App) -> bool {
     (s.zoom - s.zoom_default).abs() > 0.01 || s.ox != s.rest_ox || s.oy + status_reserved(a) as f32 / s.zoom > 0.5
 }
 
-// Draws the visible page into a screen rect: bilinear sampling, a gray desk outside the page. The
-// whole screen of it (a pinch, a zoomed page) is about 100 ms on the Kindle: the pens are read every
+// Draws the visible page into a screen rect: bilinear sampling for grayscale frames, nearest-neighbor
+// during live fast (DU) pinch/pan previews, and a gray desk outside the page. Input is pumped every
 // 64 rows (work_pump, common.h).
 fn blit_view(a: &mut App, r: Rect) {
     let top = status_reserved(a);
@@ -2046,51 +2052,260 @@ fn blit_view(a: &mut App, r: Rect) {
     );
     let App { screen, ed, .. } = a;
     let s = ed.as_deref().unwrap();
-    blit_canvas(screen, &s.page_canvas, s.zoom, s.ox, s.oy, r);
+    if s.fast_blit {
+        blit_canvas_fast(screen, &s.page_canvas, s.zoom, s.ox, s.oy, r);
+    } else {
+        blit_canvas(screen, &s.page_canvas, s.zoom, s.ox, s.oy, r);
+    }
 }
 
-// The same for any page canvas at any view: the open page's, or the one the Links bar shows.
-fn blit_canvas(screen: &mut Canvas, pc: &Canvas, zoom: f32, ox: f32, oy: f32, r: Rect) {
-    // (the C's static ix[8192], wx[8192])
-    let mut ix = [0i32; 8192];
-    let mut wx = [0u8; 8192];
-    let mut r = r;
-    if r.w > 8192 {
-        r.w = 8192;
+// Reusable per-row scratch buffers for separable bilinear blit_canvas (replaces a 40 KB stack
+// zero-init on every call, including every small pen dab while zoomed in, and caches the two
+// horizontally interpolated rows across consecutive screen rows when zoomed in).
+struct BlitScratch {
+    ix: Vec<i32>,
+    wx: Vec<u8>,
+    r0: Vec<u16>,
+    r1: Vec<u16>,
+}
+
+thread_local! {
+    static BLIT_SCRATCH: RefCell<BlitScratch> = const {
+        RefCell::new(BlitScratch { ix: Vec::new(), wx: Vec::new(), r0: Vec::new(), r1: Vec::new() })
+    };
+}
+
+fn blit_hrow(
+    out: &mut [u16],
+    src: &[u8],
+    ix: &[i32],
+    wx: &[u8],
+    desk_l: usize,
+    mid_l: usize,
+    mid_r: usize,
+    desk_r: usize,
+    pc_w: i32,
+) {
+    for i in desk_l..mid_l {
+        let x = ix[i];
+        let x0 = clampi(x, 0, pc_w - 1) as usize;
+        let x1 = clampi(x + 1, 0, pc_w - 1) as usize;
+        let wf = wx[i] as u32;
+        out[i] = (src[x0] as u32 * (255 - wf) + src[x1] as u32 * wf) as u16;
     }
-    for i in 0..r.w {
-        let fx = ((r.x + i) as f32 + 0.5) / zoom + ox - 0.5;
-        let x = fx.floor() as i32;
-        ix[i as usize] = x;
-        wx[i as usize] = ((fx - x as f32) * 255.0) as u8;
+    for ((dst, &x), &wf) in out[mid_l..mid_r].iter_mut().zip(&ix[mid_l..mid_r]).zip(&wx[mid_l..mid_r]) {
+        let x0 = x as usize;
+        let a = src[x0] as u32;
+        let b = src[x0 + 1] as u32;
+        *dst = if a == b { (a * 255) as u16 } else { (a * (255 - wf as u32) + b * wf as u32) as u16 };
     }
+    for i in mid_r..desk_r {
+        let x = ix[i];
+        let x0 = clampi(x, 0, pc_w - 1) as usize;
+        let x1 = clampi(x + 1, 0, pc_w - 1) as usize;
+        let wf = wx[i] as u32;
+        out[i] = (src[x0] as u32 * (255 - wf) + src[x1] as u32 * wf) as u16;
+    }
+}
+
+// Fast nearest-neighbor blit for live interactive pinch / pen-drag DU previews: avoids bilinear's
+// per-pixel multiply/divide and avoids creating bilinear gray halos that dither in 1-bit DU mode.
+fn blit_canvas_fast(screen: &mut Canvas, pc: &Canvas, zoom: f32, ox: f32, oy: f32, r: Rect) {
+    if rect_is_empty(r) {
+        return;
+    }
+    if pc.w <= 0 || pc.h <= 0 || zoom <= 0.0 {
+        canvas_fill(screen, r, 205);
+        return;
+    }
+    let w = r.w as usize;
+    let inv_z = 1.0f64 / zoom as f64;
+    let ox64 = ox as f64;
+    let oy64 = oy as f64;
+    let mut mid_l = 0usize;
+    while mid_l < w && (((r.x as usize + mid_l) as f64 + 0.5) * inv_z + ox64).floor() < 0.0 {
+        mid_l += 1;
+    }
+    let mut mid_r = w;
+    while mid_r > mid_l && (((r.x as usize + mid_r - 1) as f64 + 0.5) * inv_z + ox64).floor() >= pc.w as f64 {
+        mid_r -= 1;
+    }
+    let step_x = (inv_z * 65536.0).round().max(1.0) as u32;
+    let fx_start = if mid_l < mid_r {
+        ((((r.x as usize + mid_l) as f64 + 0.5) * inv_z + ox64) * 65536.0)
+            .clamp(0.0, ((pc.w - 1) as f64) * 65536.0) as u32
+    } else {
+        0
+    };
+    let in_bounds_fast = mid_l < mid_r
+        && (fx_start as u64 + step_x as u64 * (mid_r - mid_l - 1) as u64) < ((pc.w as u64) << 16);
+    let max_x = (pc.w - 1) as usize;
+    let mut prev_py: i32 = i32::MIN;
+    let mut prev_dst: usize = 0;
     for y in r.y..r.y + r.h {
-        let dst = y as usize * screen.stride as usize;
-        let fy = (y as f32 + 0.5) / zoom + oy - 0.5;
-        let py = fy.floor() as i32;
-        let wy = ((fy - py as f32) * 255.0) as u32;
-        let py0 = clampi(py, 0, pc.h - 1);
-        let py1 = clampi(py + 1, 0, pc.h - 1);
-        let r0 = py0 as usize * pc.stride as usize;
-        let r1 = py1 as usize * pc.stride as usize;
-        let row_out = py < -1 || py >= pc.h;
-        for i in 0..r.w {
-            let x = ix[i as usize];
-            if row_out || x < -1 || x >= pc.w {
-                screen.px[dst + (r.x + i) as usize] = 205;
-                continue;
+        let dst_off = y as usize * screen.stride as usize + r.x as usize;
+        let py = ((y as f64 + 0.5) * inv_z + oy64).floor() as i32;
+        if py < 0 || py >= pc.h {
+            screen.px[dst_off..dst_off + w].fill(205);
+            prev_py = i32::MIN;
+        } else if py == prev_py {
+            // Zoomed in (> 1x): consecutive screen rows hit the same source row -> memcpy.
+            screen.px.copy_within(prev_dst..prev_dst + w, dst_off);
+        } else {
+            let dst_row = &mut screen.px[dst_off..dst_off + w];
+            if mid_l > 0 {
+                dst_row[..mid_l].fill(205);
             }
-            let x0 = clampi(x, 0, pc.w - 1) as usize;
-            let x1 = clampi(x + 1, 0, pc.w - 1) as usize;
-            let w = wx[i as usize] as u32;
-            let top = pc.px[r0 + x0] as u32 * (255 - w) + pc.px[r0 + x1] as u32 * w;
-            let bot = pc.px[r1 + x0] as u32 * (255 - w) + pc.px[r1 + x1] as u32 * w;
-            screen.px[dst + (r.x + i) as usize] = ((top * (255 - wy) + bot * wy + 32512) / 65025) as u8;
+            if mid_l < mid_r {
+                let src_row = &pc.px[py as usize * pc.stride as usize..][..pc.w as usize];
+                let mut fx = fx_start;
+                if in_bounds_fast {
+                    for dst_px in &mut dst_row[mid_l..mid_r] {
+                        *dst_px = src_row[(fx >> 16) as usize];
+                        fx = fx.wrapping_add(step_x);
+                    }
+                } else {
+                    for dst_px in &mut dst_row[mid_l..mid_r] {
+                        *dst_px = src_row[((fx >> 16) as usize).min(max_x)];
+                        fx = fx.wrapping_add(step_x);
+                    }
+                }
+            }
+            if mid_r < w {
+                dst_row[mid_r..w].fill(205);
+            }
+            prev_py = py;
+            prev_dst = dst_off;
         }
         if ((y - r.y) & 63) == 63 {
             work_pump();
         }
     }
+}
+
+// The same for any page canvas at any view: the open page's, or the one the Links bar shows.
+fn blit_canvas(screen: &mut Canvas, pc: &Canvas, zoom: f32, ox: f32, oy: f32, r: Rect) {
+    if rect_is_empty(r) {
+        return;
+    }
+    if pc.w <= 0 || pc.h <= 0 || zoom <= 0.0 {
+        canvas_fill(screen, r, 205);
+        return;
+    }
+    let w = r.w as usize;
+    // Exact 1:1 integer-aligned pan inside the page: row memcpy.
+    if zoom == 1.0 && ox == ox.trunc() && oy == oy.trunc() {
+        let sx = r.x + ox as i32;
+        let sy = r.y + oy as i32;
+        if sx >= 0 && sx + r.w <= pc.w && sy >= 0 && sy + r.h <= pc.h {
+            for row in 0..r.h {
+                let dst_off = (r.y + row) as usize * screen.stride as usize + r.x as usize;
+                let src_off = (sy + row) as usize * pc.stride as usize + sx as usize;
+                screen.px[dst_off..dst_off + w].copy_from_slice(&pc.px[src_off..src_off + w]);
+                if (row & 63) == 63 {
+                    work_pump();
+                }
+            }
+            return;
+        }
+    }
+    let mut sc = BLIT_SCRATCH.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        BlitScratch {
+            ix: std::mem::take(&mut guard.ix),
+            wx: std::mem::take(&mut guard.wx),
+            r0: std::mem::take(&mut guard.r0),
+            r1: std::mem::take(&mut guard.r1),
+        }
+    });
+    sc.ix.resize(w, 0);
+    sc.wx.resize(w, 0);
+    sc.r0.resize(w, 0);
+    sc.r1.resize(w, 0);
+    {
+        let BlitScratch { ref mut ix, ref mut wx, ref mut r0, ref mut r1 } = sc;
+        for i in 0..w {
+            let fx = ((r.x + i as i32) as f32 + 0.5) / zoom + ox - 0.5;
+            let x = fx.floor() as i32;
+            ix[i] = x;
+            wx[i] = ((fx - x as f32) * 255.0) as u8;
+        }
+        // Because zoom > 0, ix is monotonically non-decreasing: split into desk / clamped edge /
+        // interior (0 <= x && x + 1 < pc.w) once before the y loop.
+        let mut desk_l = 0usize;
+        while desk_l < w && ix[desk_l] < -1 {
+            desk_l += 1;
+        }
+        let mut mid_l = desk_l;
+        while mid_l < w && ix[mid_l] < 0 {
+            mid_l += 1;
+        }
+        let mut desk_r = w;
+        while desk_r > mid_l && ix[desk_r - 1] >= pc.w {
+            desk_r -= 1;
+        }
+        let mut mid_r = desk_r;
+        while mid_r > mid_l && ix[mid_r - 1] + 1 >= pc.w {
+            mid_r -= 1;
+        }
+        let pc_w = pc.w as usize;
+        let mut cur0: i32 = i32::MIN;
+        let mut cur1: i32 = i32::MIN;
+        for y in r.y..r.y + r.h {
+            let dst_off = y as usize * screen.stride as usize + r.x as usize;
+            let fy = (y as f32 + 0.5) / zoom + oy - 0.5;
+            let py = fy.floor() as i32;
+            if py < -1 || py >= pc.h {
+                screen.px[dst_off..dst_off + w].fill(205);
+            } else {
+                let wy = ((fy - py as f32) * 255.0) as u32;
+                let iwy = 255 - wy;
+                let py0 = clampi(py, 0, pc.h - 1);
+                let py1 = clampi(py + 1, 0, pc.h - 1);
+                if py0 != cur0 {
+                    if py0 == cur1 {
+                        std::mem::swap(r0, r1);
+                        std::mem::swap(&mut cur0, &mut cur1);
+                    } else {
+                        let src0 = &pc.px[py0 as usize * pc.stride as usize..][..pc_w];
+                        blit_hrow(r0, src0, ix, wx, desk_l, mid_l, mid_r, desk_r, pc.w);
+                        cur0 = py0;
+                    }
+                }
+                if py1 != py0 && py1 != cur1 {
+                    let src1 = &pc.px[py1 as usize * pc.stride as usize..][..pc_w];
+                    blit_hrow(r1, src1, ix, wx, desk_l, mid_l, mid_r, desk_r, pc.w);
+                    cur1 = py1;
+                }
+                let dst_row = &mut screen.px[dst_off..dst_off + w];
+                if desk_l > 0 {
+                    dst_row[..desk_l].fill(205);
+                }
+                if py1 == py0 || wy == 0 {
+                    for (d, &t) in dst_row[desk_l..desk_r].iter_mut().zip(&r0[desk_l..desk_r]) {
+                        *d = ((t as u32 * 255 + 32512) / 65025) as u8;
+                    }
+                } else {
+                    for ((d, &t), &b) in dst_row[desk_l..desk_r]
+                        .iter_mut()
+                        .zip(&r0[desk_l..desk_r])
+                        .zip(&r1[desk_l..desk_r])
+                    {
+                        *d = ((t as u32 * iwy + b as u32 * wy + 32512) / 65025) as u8;
+                    }
+                }
+                if desk_r < w {
+                    dst_row[desk_r..w].fill(205);
+                }
+            }
+            if ((y - r.y) & 63) == 63 {
+                work_pump();
+            }
+        }
+    }
+    BLIT_SCRATCH.with(|cell| {
+        *cell.borrow_mut() = sc;
+    });
 }
 
 /// Where a page of pgw x pgh rests on an aw x ah screen (view_rest), centred as view_clamp centres it: what
@@ -2970,6 +3185,13 @@ pub(crate) fn compose_all(a: &mut App, m: RefreshMode) {
         },
     );
     app_invalidate_all(a, m);
+}
+
+// Live pinch / pen-drag preview frame: nearest-neighbor blit + fast (DU) refresh.
+fn compose_all_fast(a: &mut App) {
+    ed(a).fast_blit = true;
+    compose_all(a, RefreshMode::Fast);
+    ed(a).fast_blit = false;
 }
 
 fn repaint_panel(a: &mut App, m: RefreshMode) {
@@ -4686,7 +4908,9 @@ struct PenDrag {
     ox: f32,
     oy: f32,
     zoom: f32,
+    shown: (f32, f32, f32),
     painted_at: u32,
+    painted: bool,
     changed: bool,
 }
 
@@ -4731,7 +4955,10 @@ fn pb_dispatch(a: &mut App, action: i32) {
 fn pb_drag_end(a: &mut App, button: PenBtn) {
     if ed_ref(a).pb_drag.as_ref().is_none_or(|d| d.button != button) { return; }
     let drag = ed(a).pb_drag.take().unwrap();
-    if drag.changed && a.scr == ScreenId::Editor && ed_ref(a).open {
+    if (drag.changed || drag.painted) && a.scr == ScreenId::Editor && ed_ref(a).open {
+        let s = ed(a);
+        s.settle = RECT_EMPTY;
+        s.panel_stale = false;
         compose_all(a, RefreshMode::Ui);
     }
     if !ed_ref(a).pb_pen.touching && ed_ref(a).owner == Owner::PenDrag {
@@ -4770,7 +4997,7 @@ fn pb_out(a: &mut App, out: PbOut, t: u32) {
             let (mut px, mut py) = (0.0, 0.0);
             to_page(s, x, y, &mut px, &mut py);
             let drag = PenDrag { button, action, x, y, px, py, ox: s.ox, oy: s.oy,
-                zoom: s.zoom, painted_at: t, changed: false };
+                zoom: s.zoom, shown: (s.zoom, s.ox, s.oy), painted_at: t, painted: false, changed: false };
             // A bound contact is never ink, even if its action is refused by a sheet.
             a.pen_action_down = true;
             if action != GESTURE_PAN && action != GESTURE_ZOOM { pb_dispatch(a, action); }
@@ -4807,14 +5034,36 @@ fn pb_drag_move(a: &mut App, ev: &InEvent) {
     }
     view_clamp(a);
     let s = ed(a);
-    if before != (s.zoom, s.ox, s.oy) {
-        let d = s.pb_drag.as_mut().unwrap();
-        d.changed = true;
-        if ev.t_ms.wrapping_sub(d.painted_at) >= 180 {
-            d.painted_at = ev.t_ms;
-            compose_all(a, RefreshMode::Fast);
-        }
+    if view_moved(s, before) {
+        s.pb_drag.as_mut().unwrap().changed = true;
     }
+}
+
+/// editor_tick: paint the newest pen-drag zoom/pan view once per turn after queued move events
+/// coalesce, paced by display_fast_busy() so DU updates never queue behind each other.
+fn pb_drag_tick(a: &mut App, now: u32) {
+    let s = ed_ref(a);
+    if !s.open || sheet_open(s) || s.peek.active || crate::library::library_settings_active(a) {
+        return;
+    }
+    let Some(d) = s.pb_drag.as_ref() else { return };
+    if d.action != GESTURE_PAN && d.action != GESTURE_ZOOM {
+        return;
+    }
+    if !view_moved(s, d.shown) || display_fast_busy() {
+        return;
+    }
+    if d.painted && now.wrapping_sub(d.painted_at) < PINCH_STEP_MS {
+        return;
+    }
+    let view = (s.zoom, s.ox, s.oy);
+    {
+        let d = ed(a).pb_drag.as_mut().unwrap();
+        d.shown = view;
+        d.painted_at = now;
+        d.painted = true;
+    }
+    compose_all_fast(a);
 }
 
 /// Feed the shared timing model before any page/map pointer path can claim the nib.
@@ -10352,8 +10601,42 @@ pub fn editor_pin_sleep_page(a: &mut App) -> bool {
 }
 
 // Two fingers: zoom around the midpoint and pan with it. A legacy pinch (the runner's `pinch`, value 0)
+// Minimum interval between live pinch / pen-drag preview frames when display_fast_busy() is false
+// (simulator); on the Kindle, display_fast_busy() paces previews to the panel's actual DU waveform.
+const PINCH_STEP_MS: u32 = 90;
+
+/// editor_tick: paint the newest pinch zoom/pan view once per turn after queued PinchMove events
+/// coalesce, paced by display_fast_busy() so full-screen DU updates never pile up in the driver.
+fn pinch_tick(a: &mut App, now: u32) {
+    let s = ed_ref(a);
+    if !s.open
+        || !s.pinching
+        || !s.pinch_committed
+        || sheet_open(s)
+        || s.peek.active
+        || crate::library::library_settings_active(a)
+    {
+        return;
+    }
+    if !view_moved(s, s.pinch_shown) || display_fast_busy() {
+        return;
+    }
+    if s.pinch_painted && now.wrapping_sub(s.last_pinch_paint) < PINCH_STEP_MS {
+        return;
+    }
+    let view = (s.zoom, s.ox, s.oy);
+    {
+        let s = ed(a);
+        s.last_pinch_paint = now;
+        s.pinch_shown = view;
+        s.pinch_painted = true;
+    }
+    compose_all_fast(a);
+    fs_pending_cleanup(a, RefreshMode::Fast);
+}
+
 // decides itself: nothing until the fingers clearly spread or travel, then both. A session touchgest
-// classified (value 1) says what it is: ZOOM (1, no dead zone: it committed already), PAN (2, the page
+// classified (value != 0) says what it is: ZOOM (1, no dead zone: it committed already), PAN (2, the page
 // moves with the midpoint, the zoom held) or SWIPE (3, nothing moves: the gesture comes at the lift).
 fn pinch(a: &mut App, ev: &InEvent) {
     let mx = (ev.x + ev.x2) * 0.5;
@@ -10412,8 +10695,8 @@ fn pinch(a: &mut App, ev: &InEvent) {
         let pinch_zoom = a.settings.pinch_zoom;
         let s = ed(a);
         // A classified session starts with pinch zoom off too: its pan pans (the gate below is the
-        // legacy one's, with the zoom setting).
-        let classified = ev.value == 1;
+        // legacy one's, with the zoom setting). Regrab sends value 1 (zoom) or 2 (pan).
+        let classified = ev.value != 0;
         // (The bar does not pan or zoom the page behind it.)
         if s.owner != Owner::None || s.paper_open || s.mb.open || s.ts.open || s.lb.open || s.find.open || s.lt.open || s.card.open || s.qs.open || (!classified && !pinch_zoom) {
             return;
@@ -10432,6 +10715,9 @@ fn pinch(a: &mut App, ev: &InEvent) {
         s.pinch_py = py;
         if !regrab {
             s.last_pinch_paint = 0;
+            s.pinch_painted = false;
+            s.pinch_start = (s.zoom, s.ox, s.oy);
+            s.pinch_shown = (s.zoom, s.ox, s.oy);
         }
         return;
     }
@@ -10483,17 +10769,16 @@ fn pinch(a: &mut App, ev: &InEvent) {
         s.ox = s.pinch_px - mx / s.zoom; // keep the pinched spot under the fingers
         s.oy = s.pinch_py - my / s.zoom;
         view_clamp(a);
-        let s = ed(a);
-        if ev.t_ms.wrapping_sub(s.last_pinch_paint) > 180 {
-            s.last_pinch_paint = ev.t_ms;
-            compose_all(a, RefreshMode::Fast);
-        fs_pending_cleanup(a, RefreshMode::Fast);
-        }
         return;
     }
     s.pinching = false; // IN_PINCH_END
-    // Settle without a flash, and only if the view actually changed.
-    if s.pinch_committed {
+    let settled = s.pinch_committed && (s.pinch_painted || view_moved(s, s.pinch_start));
+    s.pinch_committed = false;
+    s.pinch_painted = false;
+    // Settle without a flash, and only if the view actually changed (or painted fast preview frames).
+    if settled {
+        s.settle = RECT_EMPTY;
+        s.panel_stale = false;
         compose_all(a, RefreshMode::Ui);
     }
     fs_pending_cleanup(a, RefreshMode::Ui);
@@ -12160,10 +12445,12 @@ pub fn editor_tick(a: &mut App, now: u32) {
             fs_pending_cleanup(a, RefreshMode::Ui);
         }
     }
+    pinch_tick(a, now);
+    pb_drag_tick(a, now);
     let s = ed(a);
     // The pen gone for SETTLE_LEFT_MS (not just lifted high for a moment), or near for too long.
     let stopped = (now.wrapping_sub(s.settle_at) as i32) >= 0 || (!s.pen_near && (now.wrapping_sub(s.pen_left) as i32) >= SETTLE_LEFT_MS);
-    if s.open && s.owner == Owner::None && (!rect_is_empty(s.settle) || s.panel_stale) && stopped {
+    if s.open && s.owner == Owner::None && !s.pinching && (!rect_is_empty(s.settle) || s.panel_stale) && stopped {
         settle_now(a);
     }
     du_wear_tick(a, now);
@@ -14398,9 +14685,13 @@ mod tests {
             pen_event(&mut a, InType::PenButton, true, 500.0, 700.0, 1010);
             pen_event(&mut a, InType::PenDown, true, 500.0, 700.0, 1020);
             a.dirty = RECT_EMPTY;
+            // Queued move events coalesce without painting inside the event handler.
             pen_event(&mut a, InType::PenMove, true, 550.0, 650.0, 1100);
             assert!(rect_is_empty(a.dirty));
             pen_event(&mut a, InType::PenMove, true, 600.0, 600.0, 1220);
+            assert!(rect_is_empty(a.dirty));
+            // editor_tick paints once at the latest position in Fast mode.
+            editor_tick(&mut a, 1220);
             assert_eq!(a.dirty_mode, RefreshMode::Fast);
             let s = ed_ref(&a);
             if action == GESTURE_PAN {
@@ -14414,6 +14705,206 @@ mod tests {
             assert_eq!(a.dirty_mode, RefreshMode::Ui);
             assert_eq!(ed_ref(&a).nb.page_ids, [1, 2]);
             assert!(ed_ref(&a).open_page().unwrap().strokes.is_empty());
+        }
+    }
+
+    #[test]
+    fn pinch_coalesces_moves_skips_commit_frame_and_settles_with_bilinear() {
+        let mut a = fshape_app();
+        a.dirty = RECT_EMPTY;
+        // Start a classified pinch session.
+        let mut ev = InEvent {
+            type_: InType::PinchBegin,
+            x: 300.0,
+            y: 500.0,
+            x2: 600.0,
+            y2: 500.0,
+            value: 1,
+            t_ms: 1000,
+            ..Default::default()
+        };
+        editor_event(&mut a, &ev);
+        // First classified move anchors at the commit point -> view has not moved yet -> no paint!
+        ev.type_ = InType::PinchMove;
+        ev.x = 280.0;
+        ev.x2 = 620.0;
+        ev.t_ms = 1020;
+        editor_event(&mut a, &ev);
+        editor_tick(&mut a, 1020);
+        assert!(rect_is_empty(a.dirty), "commit anchor frame must not trigger a wasted full-screen repaint");
+
+        // Multiple queued PinchMove events coalesce; nothing paints until editor_tick.
+        ev.x = 240.0;
+        ev.x2 = 660.0;
+        ev.t_ms = 1040;
+        editor_event(&mut a, &ev);
+        ev.x = 180.0;
+        ev.x2 = 720.0;
+        ev.t_ms = 1060;
+        editor_event(&mut a, &ev);
+        assert!(rect_is_empty(a.dirty), "PinchMove must not compose inside the event handler");
+        editor_tick(&mut a, 1060);
+        assert!(!rect_is_empty(a.dirty));
+        assert_eq!(a.dirty_mode, RefreshMode::Fast);
+        assert!((ed_ref(&a).zoom - (540.0 / 340.0)).abs() < 0.01);
+
+        // Within PINCH_STEP_MS, another tick does not paint again even if fingers moved slightly.
+        a.dirty = RECT_EMPTY;
+        ev.x = 160.0;
+        ev.x2 = 740.0;
+        ev.t_ms = 1080;
+        editor_event(&mut a, &ev);
+        editor_tick(&mut a, 1080);
+        assert!(rect_is_empty(a.dirty));
+
+        // Once PINCH_STEP_MS passes, tick catches up to the latest position even without new events.
+        editor_tick(&mut a, 1060 + PINCH_STEP_MS);
+        assert!(!rect_is_empty(a.dirty));
+        assert_eq!(a.dirty_mode, RefreshMode::Fast);
+
+        // PinchEnd settles in grayscale (Ui) and clears any pending stroke settle.
+        ed(&mut a).settle = Rect::new(0, 0, 50, 50);
+        a.dirty = RECT_EMPTY;
+        ev.type_ = InType::PinchEnd;
+        ev.t_ms = 1200;
+        editor_event(&mut a, &ev);
+        assert!(!rect_is_empty(a.dirty));
+        assert_eq!(a.dirty_mode, RefreshMode::Ui);
+        assert!(rect_is_empty(ed_ref(&a).settle));
+
+        // Pinching out while already at zoom_min changes nothing and paints nothing.
+        view_reset(&mut a);
+        a.dirty = RECT_EMPTY;
+        let mut ev = InEvent {
+            type_: InType::PinchBegin,
+            x: 200.0,
+            y: 500.0,
+            x2: 700.0,
+            y2: 500.0,
+            value: 1,
+            t_ms: 2000,
+            ..Default::default()
+        };
+        editor_event(&mut a, &ev);
+        ev.type_ = InType::PinchMove;
+        ev.x = 250.0;
+        ev.x2 = 650.0;
+        ev.t_ms = 2020;
+        editor_event(&mut a, &ev);
+        ev.x = 300.0;
+        ev.x2 = 600.0;
+        ev.t_ms = 2060;
+        editor_event(&mut a, &ev);
+        editor_tick(&mut a, 2060);
+        assert!(rect_is_empty(a.dirty));
+        ev.type_ = InType::PinchEnd;
+        ev.t_ms = 2100;
+        editor_event(&mut a, &ev);
+        assert!(rect_is_empty(a.dirty));
+    }
+
+    #[test]
+    fn pan_regrab_stays_classified_even_with_pinch_zoom_off() {
+        let mut a = fshape_app();
+        a.settings.pinch_zoom = false;
+        let s = ed(&mut a);
+        s.zoom = 2.0;
+        s.ox = 100.0;
+        s.oy = 100.0;
+        s.pinching = true;
+        s.pinch_committed = true;
+        s.pinch_classified = true;
+        // touchgest sends PinchBegin with value = 2 when regrabbing a Pan session.
+        let mut ev = InEvent {
+            type_: InType::PinchBegin,
+            x: 300.0,
+            y: 400.0,
+            x2: 500.0,
+            y2: 400.0,
+            value: 2,
+            t_ms: 1000,
+            ..Default::default()
+        };
+        editor_event(&mut a, &ev);
+        assert!(ed_ref(&a).pinch_classified, "Pan regrab (value=2) must stay classified");
+        ev.type_ = InType::PinchMove;
+        ev.x = 350.0;
+        ev.x2 = 650.0; // spread changed too, but pan holds zoom
+        ev.t_ms = 1040;
+        editor_event(&mut a, &ev);
+        assert_eq!(ed_ref(&a).zoom, 2.0, "Pan regrab must hold zoom without drifting");
+    }
+
+    #[test]
+    fn blit_canvas_matches_reference_and_fast_blit_aligns() {
+        fn ref_blit(screen: &mut Canvas, pc: &Canvas, zoom: f32, ox: f32, oy: f32, r: Rect) {
+            let mut ix = vec![0i32; r.w as usize];
+            let mut wx = vec![0u8; r.w as usize];
+            for i in 0..r.w {
+                let fx = ((r.x + i) as f32 + 0.5) / zoom + ox - 0.5;
+                let x = fx.floor() as i32;
+                ix[i as usize] = x;
+                wx[i as usize] = ((fx - x as f32) * 255.0) as u8;
+            }
+            for y in r.y..r.y + r.h {
+                let dst = y as usize * screen.stride as usize;
+                let fy = (y as f32 + 0.5) / zoom + oy - 0.5;
+                let py = fy.floor() as i32;
+                let wy = ((fy - py as f32) * 255.0) as u32;
+                let py0 = clampi(py, 0, pc.h - 1) as usize;
+                let py1 = clampi(py + 1, 0, pc.h - 1) as usize;
+                let r0 = py0 * pc.stride as usize;
+                let r1 = py1 * pc.stride as usize;
+                let row_out = py < -1 || py >= pc.h;
+                for i in 0..r.w {
+                    let x = ix[i as usize];
+                    if row_out || x < -1 || x >= pc.w {
+                        screen.px[dst + (r.x + i) as usize] = 205;
+                        continue;
+                    }
+                    let x0 = clampi(x, 0, pc.w - 1) as usize;
+                    let x1 = clampi(x + 1, 0, pc.w - 1) as usize;
+                    let w = wx[i as usize] as u32;
+                    let top = pc.px[r0 + x0] as u32 * (255 - w) + pc.px[r0 + x1] as u32 * w;
+                    let bot = pc.px[r1 + x0] as u32 * (255 - w) + pc.px[r1 + x1] as u32 * w;
+                    screen.px[dst + (r.x + i) as usize] = ((top * (255 - wy) + bot * wy + 32512) / 65025) as u8;
+                }
+            }
+        }
+        let mut pc = Canvas::default();
+        assert_eq!(canvas_init(&mut pc, 64, 48), 0);
+        for (i, p) in pc.px.iter_mut().enumerate() {
+            *p = if i % 5 == 0 { 255 } else if i % 7 == 0 { 0 } else { ((i * 37) % 251) as u8 };
+        }
+        let cases = [
+            (0.5f32, -32.0f32, -24.0f32),
+            (0.73, -10.5, -5.25),
+            (1.0, 0.0, 0.0),
+            (1.0, 12.0, 8.0),
+            (1.0, -4.0, -3.0),
+            (1.25, 10.3, 6.7),
+            (2.3, 20.1, 15.9),
+            (4.0, 48.0, 36.0),
+        ];
+        for (zoom, ox, oy) in cases {
+            let mut got = Canvas::default();
+            let mut want = Canvas::default();
+            let mut fast = Canvas::default();
+            assert_eq!(canvas_init(&mut got, 64, 48), 0);
+            assert_eq!(canvas_init(&mut want, 64, 48), 0);
+            assert_eq!(canvas_init(&mut fast, 64, 48), 0);
+            let r = Rect::new(0, 0, 64, 48);
+            blit_canvas(&mut got, &pc, zoom, ox, oy, r);
+            ref_blit(&mut want, &pc, zoom, ox, oy, r);
+            assert_eq!(got.px, want.px, "bilinear mismatch at zoom={zoom} ox={ox} oy={oy}");
+            blit_canvas_fast(&mut fast, &pc, zoom, ox, oy, r);
+            // Desk corners at half-zoom must match, and interior samples must match exact source pixels.
+            if zoom < 1.0 && ox < -5.0 {
+                assert_eq!(fast.px[0], 205);
+            }
+            if zoom == 1.0 && ox == 0.0 && oy == 0.0 {
+                assert_eq!(fast.px, pc.px);
+            }
         }
     }
 
