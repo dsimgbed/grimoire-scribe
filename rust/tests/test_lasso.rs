@@ -6,8 +6,9 @@
 // selection's halo along what shows of a stroke (issue #187); link
 // selection; which erase strokes go with the ink; seeds; targets across notebooks; where a paste goes;
 // layers (a history's too, and the refusal at 255); placing equals drawing the page whole, plain and
-// scoped; a resize's widths, scaled with the group (issue #204); the move oracle; the clipboard file; lasso undo and redo; and the time a move and a paste take
-// on a 1,000-stroke page (printed: cargo test --release --test test_lasso -- --nocapture).
+// scoped; a resize's widths, scaled with the group, and a resize and the opposite one (issue #204); the
+// move oracle; the clipboard file; lasso undo and redo; and the time a move and a paste take on a 1,000-stroke
+// page (printed: cargo test --release --test test_lasso -- --nocapture).
 #![allow(clippy::needless_range_loop)]
 mod testlib;
 use grimoire::prelude::*;
@@ -657,7 +658,8 @@ fn placing_equals_drawing_whole() {
 // A resize (issue #204): each stroke's widths scale with its points, ink, white ink and the erasing that goes
 // with it alike, so the group is put down as a picture of itself, larger or smaller. With the widths kept, an
 // erased word came back as traces at 1.1 times, and a group shrunk to half had its gaps cut as wide as before,
-// over ink that showed. A width stays within the range a page file keeps, and reads back as it was put down.
+// over ink that showed. Past the range a page file keeps, the page in memory keeps the width scaled, the brush
+// draws it at the range's end, and the page file keeps that end, which draws the same.
 fn a_resize_scales_widths_with_the_group() {
     // pixels of c in a rect (page px) darker than the paper by more than t levels
     let off = |c: &Canvas, paper: &[u8], (x0, y0, x1, y1): (i32, i32, i32, i32), t: i32| -> usize {
@@ -748,8 +750,9 @@ fn a_resize_scales_widths_with_the_group() {
     let at = |x: f32, y: f32| ((ax + (x - ax) * k).round() as i32, (ay + (y - ay) * k).round() as i32);
     let ((x0, y0), (x1, y1)) = (at(90.0, 165.0), at(290.0, 235.0));
     check!(off(&full, &before.px, (x0, y0, x1, y1), 6) == 0);
-    // within the range a page file keeps (the brush draws no wider either), so a page reads back as put down;
-    // floor markers as they were; a scale of 1 changes nothing
+    // past the range a page file keeps (0.10 to 12 mm): kept scaled in memory (so the opposite resize gives it back,
+    // below), drawn at the range's end, and written at it, so the page read back draws as the page did; floor markers
+    // as they were; a scale of 1 changes nothing
     let mut g = Group::default();
     g.strokes.push(poly(TOOL_HIGHLIGHTER, &[(10.0, 10.0), (90.0, 10.0)], 5.6, 1));
     g.strokes.push(eraser(&[(10.0, 30.0), (90.0, 30.0)], 0.3));
@@ -757,24 +760,113 @@ fn a_resize_scales_widths_with_the_group() {
     let marker = g.strokes[2].params;
     let mut big = g.clone();
     lasso_scale_widths(&mut big, 3.0);
-    check!(big.strokes[0].params.size_max_mm == 12.0 && (big.strokes[1].params.size_max_mm - 0.9).abs() < 1e-4);
+    check!((big.strokes[0].params.size_max_mm - 16.8).abs() < 1e-4 && (big.strokes[1].params.size_max_mm - 0.9).abs() < 1e-4);
     check!(big.strokes[2].params == marker);
     let mut small = g.clone();
     lasso_scale_widths(&mut small, 0.2);
-    check!((small.strokes[0].params.size_max_mm - 1.12).abs() < 1e-4 && small.strokes[1].params.size_max_mm == 0.1);
+    check!((small.strokes[0].params.size_max_mm - 1.12).abs() < 1e-4 && (small.strokes[1].params.size_min_mm - 0.06).abs() < 1e-5);
     let mut same = g.clone();
     lasso_scale_widths(&mut same, 1.0);
     check!(same.strokes.iter().zip(&g.strokes).all(|(a, b)| a.params == b.params));
-    for grp in [&big, &small] {
+    // (the widths as the file holds them, before any reader clamps them: FORMAT.md, version 1, the stroke records
+    // from byte 20, each 64 bytes and 18 a point, its parameters from its byte 8)
+    let file_widths = |b: &[u8]| -> Vec<[f32; 2]> {
+        let f = |at: usize| f32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let n = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]) as usize;
+        let (mut at, mut out) = (20, Vec::new());
+        for _ in 0..n(16) {
+            out.push([f(at + 8), f(at + 12)]);
+            at += 64 + 18 * n(at + 60);
+        }
+        out
+    };
+    for (grp, want) in [(&big, [12.0f32, 0.9]), (&small, [1.12, 0.1])] {
         let mut p = page_new(100, 100, PAPER_BLANK);
         for s in &grp.strokes[..2] {
             page_add(&mut p, Box::new((**s).clone()));
         }
         let mut bytes = Vec::new();
         check!(page_serialize(&p, &mut bytes) == 0);
+        check!(file_widths(&bytes).iter().zip(want).all(|(w, k)| (w[0] - k).abs() < 1e-4 && (w[1] - k).abs() < 1e-4));
         let mut back = None;
         check!(page_deserialize(&bytes, &mut back) == 0);
-        check!(back.is_some_and(|b| b.strokes.iter().zip(&p.strokes).all(|(a, b)| a.params == b.params)));
+        let Some(back) = back else { continue };
+        for (k, (a, b)) in back.strokes.iter().zip(&p.strokes).enumerate() {
+            check!((a.params.size_min_mm - want[k]).abs() < 1e-4 && (a.params.size_max_mm - want[k]).abs() < 1e-4);
+            check!((2..ToolParams::COUNT).all(|i| a.params.get(i) == b.params.get(i)));
+        }
+        // (drawn as with the widths the file keeps; compared in memory, as a point's pressure is rounded in the file)
+        let mut kept = p.clone();
+        for (k, s) in kept.strokes.iter_mut().enumerate() {
+            (s.params.size_min_mm, s.params.size_max_mm) = (want[k], want[k]);
+        }
+        check!(render(&kept).px == render(&p).px);
+    }
+}
+
+// A resize and the opposite one give the page back (issue #204), as they did with the widths kept: made twice as
+// large and back, a word one pass of the default precise eraser (8 mm) took away with a few pixels to spare shows
+// nothing again, though at twice the size its erasing is drawn at 12 mm; made a twentieth as large and back, a
+// pencil line is as thin as it was, though at a twentieth it is drawn at 0.10 mm. A width clamped at each resize
+// lost its value: the eraser 6 mm after the first (the word's loops back) and the pencil 2 mm after the second.
+fn a_resize_and_its_opposite_give_the_page_back() {
+    let off = |c: &Canvas, paper: &[u8], (x0, y0, x1, y1): (i32, i32, i32, i32), t: i32| -> usize {
+        let mut n = 0;
+        for y in y0.max(0)..y1.min(c.h) {
+            for x in x0.max(0)..x1.min(c.w) {
+                let a = (y * c.w + x) as usize;
+                n += (paper[a] as i32 - c.px[a] as i32 > t) as usize;
+            }
+        }
+        n
+    };
+    let mut src = page_new(1400, 1200, PAPER_BLANK);
+    // the word, 80 px tall, and the one pass across it; a pencil line (0.13 to 0.35 mm) cut by a 2 mm eraser
+    page_add(&mut src, ink(&[(100.0, 160.0), (140.0, 240.0), (180.0, 160.0), (220.0, 240.0), (260.0, 160.0), (300.0, 240.0)], 1));
+    page_add(&mut src, poly(TOOL_ERASER, &[(80.0, 200.0), (320.0, 200.0)], 8.0, erase_seed(TOOL_ERASER, 3)));
+    let mut pencil = poly(TOOL_PENCIL, &[(100.0, 350.0), (500.0, 350.0)], 0.35, 2);
+    pencil.params.size_min_mm = 0.13;
+    page_add(&mut src, pencil);
+    page_add(&mut src, eraser(&[(300.0, 320.0), (300.0, 380.0)], 2.0));
+    let (c, paper) = (render(&src), paper_of(&src));
+    let word = (90, 150, 310, 250);
+    check!(off(&c, &paper, word, 6) == 0);
+    let g0 = lasso_lift(&src, &[0, 2], Vec::new(), DPI);
+    check!(g0.carried == 2);
+    // (both resizes about the same corner, the first box's, so the points come back where they were)
+    let (ax, ay) = (g0.box_.x as f32, g0.box_.y as f32);
+    let spot = |k: f32| Spot { dx: ax - ax * k, dy: ay - ay * k, scale: k };
+    // the selection resized k1 times and then k2: with the widths scaled (now), or kept (before issue #204)
+    let resized = |k1: f32, k2: f32, scale: bool| -> Box<Page> {
+        let mut g = g0.clone();
+        if scale {
+            lasso_scale_widths(&mut g, k1);
+        }
+        let mut mid = page_new(1400, 1200, PAPER_BLANK);
+        place_and_append(&mut mid, &g, spot(k1));
+        let ink_at: Vec<usize> = (0..mid.strokes.len()).filter(|&i| stroke_is_ink(&mid.strokes[i])).collect();
+        let mut g = lasso_lift(&mid, &ink_at, Vec::new(), DPI);
+        check!(ink_at.len() == 2 && g.carried == 2);
+        if scale {
+            lasso_scale_widths(&mut g, k2);
+        }
+        let mut end = page_new(1400, 1200, PAPER_BLANK);
+        place_and_append(&mut end, &g, spot(k2));
+        end
+    };
+    for (k1, k2) in [(2.0f32, 0.5f32), (0.05, 20.0)] {
+        let (now, kept) = (resized(k1, k2, true), resized(k1, k2, false));
+        check!(now.strokes.len() == 4 && kept.strokes.len() == 4);
+        // every width as it was, and every point where the widths kept put it
+        for (a, b) in now.strokes.iter().zip(&kept.strokes) {
+            check!((a.params.size_min_mm / b.params.size_min_mm - 1.0).abs() < 1e-5 && (a.params.size_max_mm / b.params.size_max_mm - 1.0).abs() < 1e-5);
+            check!(a.pts == b.pts);
+        }
+        let (c, kc) = (render(&now), render(&kept));
+        let differ = c.px.iter().zip(&kc.px).filter(|(a, b)| a != b).count();
+        let traces = off(&c, &paper_of(&now), word, 6);
+        eprintln!("  resized {k1} then {k2}: {traces} pixels of the erased word show, {differ} pixels differ from the widths kept");
+        check!(traces == 0 && differ == 0);
     }
 }
 
@@ -1113,6 +1205,7 @@ fn test_lasso() {
     run!(layers_skip_the_page_and_its_history);
     run!(placing_equals_drawing_whole);
     run!(a_resize_scales_widths_with_the_group);
+    run!(a_resize_and_its_opposite_give_the_page_back);
     run!(move_oracle);
     run!(clipboard_round_trip_and_refusals);
     run!(lasso_undo_redo);

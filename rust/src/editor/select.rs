@@ -1179,7 +1179,8 @@ fn preview_fold(a: &mut App, t: u32, show: bool) {
                 }
                 let st = &p.strokes[i];
                 rects.push(halo_rect(s, st));
-                let w = (2.0 * mm_to_px(st.params.size_max_mm.max(0.1), dpi) * zoom) as i64 + 2 * halo as i64;
+                // (the width as the brush takes it: a resized stroke's may be past 12 mm in memory, lasso_scale_widths)
+                let w = (2.0 * mm_to_px(st.params.size_max_mm.max(0.1).min(12.0), dpi) * zoom) as i64 + 2 * halo as i64;
                 area += ((stroke_length(st) * zoom) as i64 + w) * w;
             }
             Some((rects, area))
@@ -1339,7 +1340,8 @@ pub(super) fn sel_draw_halo(a: &mut App, r: Rect) {
             (Some(v), shown) => {
                 let run_at: Option<HashMap<(u32, u32), usize>> = shown.map(|runs| runs.iter().enumerate().flat_map(|(r, run)| run.iter().map(move |q| ((q.0.to_bits(), q.1.to_bits()), r))).collect());
                 let run = |x: f32, y: f32| run_at.as_ref().map_or(Some(0), |m| m.get(&(x.to_bits(), y.to_bits())).copied());
-                let ink = 2.0 * mm_to_px(st.params.size_max_mm.max(0.1), dpi) * 0.5 * zoom;
+                // (the width as the brush takes it: a resized stroke's may be past 12 mm in memory)
+                let ink = 2.0 * mm_to_px(st.params.size_max_mm.max(0.1).min(12.0), dpi) * 0.5 * zoom;
                 let t = ink.round() as i32 + 2 * halo;
                 let mut cur: Vec<(f32, f32, i32)> = Vec::new();
                 for k in 0..v.len() {

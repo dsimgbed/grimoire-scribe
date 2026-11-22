@@ -12398,9 +12398,10 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
         csnprintf!(out, cap, "%s", match v { None => "none", Some(true) => "1", Some(false) => "0" });
     } else if key == "stroke_screen_mm" {
         // The newest stroke's widest, as the screen shows it at the zoom now (the precise eraser's
-        // keeps its setting at any zoom); empty with no stroke.
+        // keeps its setting at any zoom; a resized stroke's past 12 mm is drawn 12 mm wide); empty with no
+        // stroke.
         match if has_page { newest(s) } else { None } {
-            Some(x) => csnprintf!(out, cap, "%.2f", x.params.size_max_mm * s.zoom),
+            Some(x) => csnprintf!(out, cap, "%.2f", x.params.size_max_mm.max(0.1).min(12.0) * s.zoom),
             None => csnprintf!(out, cap, "%s", ""),
         };
     } else if key == "stroke_look" {

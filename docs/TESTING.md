@@ -3606,12 +3606,13 @@ A selection made larger or smaller by a corner handle now scales the widths of e
 black ink, white ink and the erasing that goes with the ink alike, so the page after Done looks as the selection
 did, larger or smaller (before, the widths stayed and an enlarged selection showed faint traces of the words it had
 erased). A lasso round only ink you erased wholly selects nothing and says "Nothing to select.", as a lasso round
-empty paper does. Automated: tests/test_lasso.rs (a_resize_scales_widths_with_the_group), z_lasso_28_resize_erased
-(1.1 and 1.5 times, smaller again, half size, each undone; erasing made larger over a line the lasso left out),
-z_lasso_29_erased_only (the precise eraser, white ink, empty paper, erased ink beside ink that shows, exact area,
-the mode button), z_lasso_30_erased_link (erased ink inside a link's area), z_lasso_23_erased_marks and
-z_lasso_24_erased_marks_whole. They check the headless runner's panel; on the Kindle, check what the screen shows.
-Not run on a Scribe.
+empty paper does. Automated: tests/test_lasso.rs (a_resize_scales_widths_with_the_group,
+a_resize_and_its_opposite_give_the_page_back), z_lasso_28_resize_erased (1.1 and 1.5 times, smaller again, half
+size, each undone; erasing made larger over a line the lasso left out), z_lasso_31_resize_back (twice as large and
+back, in one selection, after Done, and after the notebook is opened again), z_lasso_29_erased_only (the precise
+eraser, white ink, empty paper, erased ink beside ink that shows, exact area, the mode button),
+z_lasso_30_erased_link (erased ink inside a link's area), z_lasso_23_erased_marks and z_lasso_24_erased_marks_whole.
+They check the headless runner's panel; on the Kindle, check what the screen shows. Not run on a Scribe.
 
 1. **Set up**: Settings > Pen > Eraser > Takes away only what it touches. In a new notebook write three lines of
    words on page 1. With the eraser, erase one word wholly in two or three strokes, and cut a gap through a word
@@ -3622,20 +3623,25 @@ Not run on a Scribe.
    out by about a tenth. Done. Where the erased word and the whited-out word were, the page shows nothing, not
    even a faint gray; both gaps are clean. The writing is a tenth larger, its lines a tenth wider.
 4. **Much larger**: Undo (the page is as it was). Lasso the lines again and drag the handle out to about one and a
-   half times. Done. The same: nothing where the erased words were, both gaps clean; the lines are half as thick
-   again. Undo.
+   half times (no further: there the default eraser's marks reach 12 mm, the widest drawn, check 8). Done. The
+   same: nothing where the erased words were, both gaps clean; the lines are half as thick again. Undo.
 5. **Smaller**: lasso the lines again and drag the handle in to about half. Done. The words and their gaps are half
    as large, the lines half as thick, and the ink beside each gap still shows (before 2.2 the gaps kept their width
    and ate into the words). Undo.
-6. **Back again**: lasso the lines, make them one and a half times as large, then drag the same handle back to
-   where it began, and Done: the writing looks as it did before both, its lines as thick.
+6. **Back again**: lasso the lines, make them twice as large, then drag the same handle back to where it began,
+   and Done: the writing looks as it did before both, its lines as thick, and nothing shows where the erased words
+   were (at twice the size traces may show at the edge of the erasing, check 8). Make them twice as large again,
+   Done, then lasso them and drag the handle back to about where it began: the same. Undo four times: the page is
+   as it was.
 7. **Over other writing**: write a word to the right of the lines, apart from them. Lasso only the three lines and
    make them larger until the box reaches over that word. Done: that word shows whole, also where the erased words'
    erasing now passes over it.
 8. **The widest erasing**: erasing is drawn at most 12 mm wide, so the default eraser's marks (8 mm at full
    pressure) stop growing past about one and a half times, and the 12 mm eraser's at once. Erase a word with the
    12 mm eraser (hold the eraser on the toolbar to pick it), lasso it with a word that shows, and make them twice
-   as large: note whether any trace of the erased word comes back at the edge of the erasing.
+   as large: note whether any trace of the erased word comes back at the edge of the erasing. Done, go to the
+   Library and open the notebook again, lasso the two words and make them as large as they were: the page file
+   keeps the erasing at 12 mm, so it comes back 6 mm wide where it was 12: note what shows of the erased word.
 9. **An empty lasso**: Select, and lasso round the erased word alone: "Nothing to select." shows at the bottom, no
    box is drawn, and Select mode stays. The same round the whited-out word. Round empty paper: "Nothing to select."
    as before. Round a white stroke drawn over paper alone: "Nothing to select: white ink and eraser marks move with
