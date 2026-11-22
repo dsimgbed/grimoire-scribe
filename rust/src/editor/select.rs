@@ -2950,8 +2950,8 @@ pub(super) fn sel_probe(a: &App, key: &str) -> Option<String> {
         // exact area: the selection's (or the next lasso's) mode, and how many strokes its plan cuts
         "sel_exact" => (if matches!(s.sel.state, SelState::Off | SelState::Armed) { exact_mode() } else { s.sel.exact } as i32).to_string(),
         "sel_cut" => s.sel.plan.len().to_string(),
-        // the open page's strokes, hashed (tool, seed, ext, every point): "page_sig_keep" keeps it (and says
-        // "kept"), "page_sig_same" says 1 while it is the one kept (an exact-area Copy leaves the page so)
+        // the open page's strokes, hashed (tool, seed, ext, parameters, every point): "page_sig_keep" keeps it
+        // (and says "kept"), "page_sig_same" says 1 while it is the one kept (an exact-area Copy leaves the page so)
         "page_sig_keep" => {
             PAGE_SIG.with(|c| c.set(page_sig(s)));
             "kept".to_string()
@@ -3033,6 +3033,10 @@ fn page_sig(s: &EditorState) -> u64 {
             eat(st.tool.0 as u32);
             eat(st.seed);
             eat(u32::from_le_bytes([st.ext[0], st.ext[1], st.ext[2], 0]));
+            // (its parameters too: a resize scales the widths, issue #204)
+            for k in 0..ToolParams::COUNT {
+                eat(st.params.get(k).to_bits());
+            }
             for q in &st.pts {
                 eat(q.x.to_bits());
                 eat(q.y.to_bits());

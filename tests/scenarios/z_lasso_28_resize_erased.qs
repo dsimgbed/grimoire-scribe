@@ -7,8 +7,8 @@
 # lasso_scale_widths), so the page after Done looks as the selection did, larger or smaller. Before, the widths
 # stayed: made larger, the erasing no longer covered the ink it had erased and the page showed traces of an erased
 # word (at 1.1 times faint ones, which the halo outlined; at 1.5 dark ones) and of a line cut by white ink; made
-# smaller, the erasing took away ink that showed beside a cut. Undo puts the page back exactly; erasing made larger
-# over ink outside the selection is scoped to its floor and leaves that ink as it was.
+# smaller, the erasing took away ink that showed beside a cut. Undo and redo put the page back exactly, widths and
+# all; erasing made larger over ink outside the selection is scoped to its floor and leaves that ink as it was.
 # display.dark counts what the panel shows dark in a place; editor.halo the selected strokes the page shows some of.
 # (the clock corner held still: its minute's refresh would land among the counted ones)
 clock 1700000000
@@ -232,8 +232,25 @@ expect display.dark.360.748.270.50 is 0
 expect display.dark.510.868.20.9 is 0
 expect display.dark.513.944.12.8 is 0
 shot 02-smaller
+# redo puts the resized page back exactly (page_sig hashes each stroke's parameters with its points, so the
+# widths too; the undos above put the page back exactly so)
+expect editor.page_sig_keep is kept
 pentap panel undo
+wait 400
+expect editor.strokes is 13
+expect editor.page_sig_same is 0
+expect editor.live_matches_render is 1
+pentap panel redo
 wait 400
 expect editor.page_sig_same is 1
 expect editor.live_matches_render is 1
+waitfor display.stale.300.600.1000.800 is 0
+expect display.dark.479.866.18.12 not 0
+expect display.dark.360.748.270.50 is 0
+pentap panel undo
+wait 400
+expect editor.strokes is 13
+expect editor.live_matches_render is 1
+waitfor display.stale.300.600.1000.800 is 0
+expect display.dark.360.850.540.100 is 0
 quit
