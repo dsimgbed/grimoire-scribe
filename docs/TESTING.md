@@ -3602,15 +3602,18 @@ check below lassoes a page that holds some.
 
 ## 2.2, lasso resize and an empty lasso (issues #204, #205): device checks
 
-A selection made larger or smaller by a corner handle now scales the widths of everything in it with its size,
-black ink, white ink and the erasing that goes with the ink alike, so the page after Done looks as the selection
-did, larger or smaller (before, the widths stayed and an enlarged selection showed faint traces of the words it had
-erased). A lasso round only ink you erased wholly selects nothing and says "Nothing to select.", as a lasso round
+A selection made larger or smaller by a corner handle now scales the widths of everything in it with its size, black
+ink, white ink and the erasing that goes with the ink alike, so the page after Done looks as the selection did,
+larger or smaller (before, the widths stayed and an enlarged selection showed faint traces of the words it had
+erased). A selection pasted into a notebook of a smaller page size, scaled down to fit it, has its widths scaled the
+same way. A lasso round only ink you erased wholly selects nothing and says "Nothing to select.", as a lasso round
 empty paper does. Automated: tests/test_lasso.rs (a_resize_scales_widths_with_the_group,
 a_resize_and_its_opposite_give_the_page_back), z_lasso_28_resize_erased (1.1 and 1.5 times, smaller again, half
 size, each undone; erasing made larger over a line the lasso left out), z_lasso_31_resize_back (twice as large and
-back, in one selection, after Done, and after the notebook is opened again), z_lasso_29_erased_only (the precise
-eraser, white ink, empty paper, erased ink beside ink that shows, exact area, the mode button),
+back, in one selection, after Done, and after the notebook is opened again), z_lasso_32_paste_fit_widths (a line
+with a white ink cut and an eraser cut, pasted from a 1986 x 2648 page into an 1860 x 2480 one: the ink, the white
+ink and the erasing 0.9366 times as wide, the cut that much narrower; undo and redo), z_lasso_29_erased_only (the
+precise eraser, white ink, empty paper, erased ink beside ink that shows, exact area, the mode button),
 z_lasso_30_erased_link (erased ink inside a link's area), z_lasso_23_erased_marks and z_lasso_24_erased_marks_whole.
 They check the headless runner's panel; on the Kindle, check what the screen shows. Not run on a Scribe.
 
@@ -3657,3 +3660,9 @@ They check the headless runner's panel; on the Kindle, check what the screen sho
 13. **A link**: on a page with a link drawn round some writing (Link to...), erase that writing wholly, and lasso
     round where it was: the link is selected (its area dashed, "1 link" on the bar), as before; Done.
 14. **Spanish**: Settings > Language > Español: the empty lasso says "Nada que seleccionar.".
+15. **Pasted to fit a smaller page** (needs a notebook of each Scribe page size, 1860 x 2480 and 1986 x 2648, one
+    made on a Scribe of each size; skip it without them): in the 1986 x 2648 notebook draw a line from edge to
+    edge, cut a gap in it with the eraser and another with white ink, lasso it all and Copy. Open the 1860 x 2480
+    notebook, Select, Paste: the line is scaled down to fit the page, and on the screen it looks as it did in the
+    notebook it came from, its lines as thick and its gaps as wide (before 2.2 they kept their width in mm and came
+    out a little thicker and wider). Undo.

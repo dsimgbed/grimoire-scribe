@@ -2799,7 +2799,8 @@ fn finger_lift(a: &mut App) {
 }
 
 /// Paste: the clipboard's group at the end of the open page (where it was if that spot is in view, else
-/// in the middle of the view; centred on `at`, a long press), selected, one step with its links.
+/// in the middle of the view; centred on `at`, a long press; scaled down, widths too, only to fit a smaller
+/// page), selected, one step with its links.
 pub(super) fn sel_paste(a: &mut App, at: Option<(i32, i32)>) {
     let dpi = a.dpi;
     if refuse_readonly(a) {
@@ -2824,6 +2825,9 @@ pub(super) fn sel_paste(a: &mut App, at: Option<(i32, i32)>) {
     let page = s.hist[ip].page.as_deref().unwrap();
     let dst_links: Vec<NavLink> = s.nav.links.iter().filter(|l| l.pid == pid).copied().collect();
     let mut gl = g.clone();
+    // scaled down to fit this page (a group larger than it): its widths with its points, as a resize scales
+    // them (spot.scale is 1 for a paste that fits: no change)
+    lasso_scale_widths(&mut gl, spot.scale);
     let mut index_left = false;
     if g.src_nb != here {
         gl.links.retain(|l| {

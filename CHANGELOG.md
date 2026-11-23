@@ -149,7 +149,8 @@
   resize too. The lasso's work over much erased ink is several times quicker, so its line keeps up with the pen
   there (it could cut straight across part of the way). A selection made larger or smaller by a corner now scales
   the width of everything in it with its size, ink, white ink and erasing alike, so an erased word no longer comes
-  back as faint traces after Done. A lasso round only ink you erased wholly selects nothing and says "Nothing to
+  back as faint traces after Done; a selection pasted into a notebook of a smaller page size, scaled down to fit
+  it, is scaled the same way. A lasso round only ink you erased wholly selects nothing and says "Nothing to
   select.", as a lasso round empty paper does.
 
 ## 2.1.0 (2026-11-13)
