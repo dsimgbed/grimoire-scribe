@@ -3544,8 +3544,11 @@ pub fn page_serialize(p: &Page, out: &mut Vec<u8>) -> i32 {
         w_u8(&mut w, s.tool.0 as u8);
         w.extend_from_slice(&s.ext); // as read (0 for strokes drawn here)
         w_u32(&mut w, s.seed);
-        for k in 0..ToolParams::COUNT {
-            w_f32(&mut w, s.params.get(k));
+        // (each width within the range every reader clamps it to, FORMAT.md: a resized stroke's may be past it
+        // in memory, lasso_scale_widths, and is drawn at the range's end)
+        for (k, pi) in tool_param_table().iter().enumerate() {
+            let v = s.params.get(k);
+            w_f32(&mut w, if pi.field <= 1 { clampf(v, pi.min, pi.max) } else { v });
         }
         w_u32(&mut w, s.pts.len() as u32);
         for q in s.pts.iter() {

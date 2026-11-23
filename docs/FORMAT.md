@@ -1568,7 +1568,8 @@ critical on purpose.
   says "Couldn't read clipboard." and changes nothing.
 - Paste puts the group 1:1 in page pixels where it was if that spot is on screen and on the page (3 mm
   right and down on the page it was copied from), else in the middle of the view, clamped onto the page;
-  only a group larger than the page is scaled down (points, areas and outlines; widths stay in mm).
+  only a group larger than the page is scaled down (points, areas and outlines; since 2.2 the widths too, as a
+  lasso resize scales them, written within the parameter table's range).
   Pasted into another notebook, a link's target is rewritten: `p<id>` becomes `n:<source id>:p<id>`,
   `n:<this notebook>:p<id>` becomes `p<id>` while this notebook still has that page (a link to one it
   deleted keeps its `n:` form, so it stays a broken link to repair, not one a save drops); a link to
