@@ -749,6 +749,7 @@ pub fn stroke_length(s: &Stroke) -> f32 {
 pub struct Selection {
     pub strokes: Vec<usize>,
     pub links: Vec<usize>,
+    pub zlinks: Vec<usize>,
 }
 
 /// The ink and links lasso l selects on page p, whose links (page pid's) are `links`. A link comes
@@ -823,7 +824,38 @@ pub fn lasso_select_from(p: &Page, links: &[NavLink], l: &Lasso, mut on: Vec<boo
             sel_links.push(k);
         }
     }
-    Selection { strokes: (0..on.len()).filter(|&i| on[i]).collect(), links: sel_links }
+    Selection { strokes: (0..on.len()).filter(|&i| on[i]).collect(), links: sel_links, zlinks: Vec::new() }
+}
+
+/// Which Zotero references are selected: when center is inside the lasso OR >= 20 of 64 grid cells (8x8) are inside.
+pub fn lasso_select_zlinks(zlinks: &[crate::zotero_bridge::ZoteroRef], l: &Lasso) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (k, z) in zlinks.iter().enumerate() {
+        let a = z.area;
+        let cx = a.x as f32 + a.w as f32 / 2.0;
+        let cy = a.y as f32 + a.h as f32 / 2.0;
+        let center_in = l.inside(cx, cy);
+        let mut inside_cells = 0;
+        for gy in 0..8 {
+            for gx in 0..8 {
+                let x = a.x as f32 + (gx as f32 + 0.5) * a.w as f32 / 8.0;
+                let y = a.y as f32 + (gy as f32 + 0.5) * a.h as f32 / 8.0;
+                if l.inside(x, y) {
+                    inside_cells += 1;
+                }
+            }
+        }
+        if center_in || inside_cells >= 20 {
+            out.push(k);
+        }
+    }
+    out
+}
+
+pub fn lasso_select_with_zlinks(p: &Page, links: &[NavLink], zlinks: &[crate::zotero_bridge::ZoteroRef], l: &Lasso, dpi: f32) -> Selection {
+    let mut sel = lasso_select_from(p, links, l, lasso_enclosed(p, l, dpi));
+    sel.zlinks = lasso_select_zlinks(zlinks, l);
+    sel
 }
 
 /// Whether any ink stroke of p is visible at all under its erase strokes (for Copy and Cut, which leave
@@ -930,6 +962,7 @@ pub struct Group {
     pub strokes: Vec<Box<Stroke>>,
     /// carried links, at the source's coordinates, with their own seeds (pid: the source page)
     pub links: Vec<NavLink>,
+    pub zlinks: Vec<crate::zotero_bridge::ZoteroRef>,
     /// the box of its ink and link areas, on the source page
     pub box_: Rect,
     /// where it came from: the notebook's id and the page id (for cross-notebook targets and the
@@ -951,6 +984,11 @@ fn copy_stroke(s: &Stroke) -> Box<Stroke> {
 /// first group stroke that came after it; so each carried erase stroke takes away, in the group, exactly
 /// the group's ink it took away on the page.
 pub fn lasso_lift(p: &Page, sel: &[usize], links: Vec<NavLink>, dpi: f32) -> Group {
+    lasso_lift_with_zlinks(p, sel, links, Vec::new(), dpi)
+}
+
+/// lasso_lift with carried Zotero references.
+pub fn lasso_lift_with_zlinks(p: &Page, sel: &[usize], links: Vec<NavLink>, zlinks: Vec<crate::zotero_bridge::ZoteroRef>, dpi: f32) -> Group {
     let carried = lasso_carried(p, sel, dpi);
     let floors = page_floors(p);
     let f = floors.as_deref();
@@ -987,11 +1025,15 @@ pub fn lasso_lift(p: &Page, sel: &[usize], links: Vec<NavLink>, dpi: f32) -> Gro
             box_ = rect_union(box_, l.area);
         }
     }
+    for z in &zlinks {
+        box_ = rect_union(box_, z.area);
+    }
     Group {
         w: p.w,
         h: p.h,
         strokes,
         links,
+        zlinks,
         box_: rect_intersect(box_, page),
         src_nb: p.nb.as_str().to_string(),
         src_pid: 0,
@@ -1552,11 +1594,12 @@ pub struct CutPlan {
     pub whole: Vec<usize>,
     pub cut: Vec<(usize, Vec<(Box<Stroke>, bool)>)>,
     pub links: Vec<usize>,
+    pub zlinks: Vec<usize>,
 }
 
 impl CutPlan {
     pub fn is_empty(&self) -> bool {
-        self.whole.is_empty() && self.cut.is_empty() && self.links.is_empty()
+        self.whole.is_empty() && self.cut.is_empty() && self.links.is_empty() && self.zlinks.is_empty()
     }
     /// How many strokes it takes (whole ones and inside pieces).
     pub fn taken(&self) -> usize {

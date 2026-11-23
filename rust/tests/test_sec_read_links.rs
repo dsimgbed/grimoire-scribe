@@ -746,7 +746,7 @@ fn the_link_sidecars_take_a_plain_file_only() {
 
 /// A lasso group of one stroke, for the clipboard.
 fn group() -> Group {
-    Group { w: 600, h: 800, strokes: vec![wave(5, 200.0)], links: Vec::new(), box_: Rect::new(60, 200, 360, 30), src_nb: "nb-clip".into(), src_pid: 1, ink: 1, carried: 0 }
+    Group { w: 600, h: 800, strokes: vec![wave(5, 200.0)], links: Vec::new(), zlinks: Vec::new(), box_: Rect::new(60, 200, 360, 30), src_nb: "nb-clip".into(), src_pid: 1, ink: 1, carried: 0 }
 }
 
 // The lasso's clipboard (clipboard.qpg) is read, for a paste and for the copy a Cut keeps, when the entry at its

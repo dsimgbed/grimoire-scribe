@@ -318,7 +318,7 @@ fn inbox(bridge: &str) {
 }
 
 fn zref(pid: u32, seed: u32, item_key: &str, attachment_key: &str, page: u32, locator: &str, short_cite: &str, area: Rect) -> ZoteroRef {
-    ZoteroRef { pid, seed, area, item_key: item_key.to_string(), attachment_key: attachment_key.to_string(), page, locator: locator.to_string(), short_cite: short_cite.to_string() }
+    ZoteroRef { pid, seed, area, item_key: item_key.to_string(), attachment_key: attachment_key.to_string(), page, locator: locator.to_string(), short_cite: short_cite.to_string(), quote: String::new() }
 }
 
 fn sidecar(bridge: &str, store: &str, nb: &NotebookInfo) {
@@ -477,7 +477,11 @@ fn app_and_startup(bridge: &str, base: &PathBuf, nb: &NotebookInfo) {
     assert_eq!(bridge_startup(&mut a), 0);
     assert!(handoff_peek_in(bridge).is_none(), "a handoff is single-shot");
     assert_eq!(inbox_count(), 0);
-    assert_eq!(pending_citations(), vec![event]);
+    // Returning from essay with exactly 1 citation auto-places it on the open page
+    assert!(pending_citations().is_empty(), "single citation is auto-placed on return_essay");
+    let links = zoterolinks_load(nb.id.as_str());
+    assert_eq!(zoterolinks_of(&links, nb.page_ids[1]).len(), 2);
+    assert!(zoterolinks_of(&links, nb.page_ids[1]).iter().any(|z| z.item_key == "ABCD1234"));
     let mut probe = String::new();
     assert_eq!(editor_probe(&mut a, "notebook_id", &mut probe, 64), 0);
     assert_eq!(probe, nb.id.as_str());
@@ -570,6 +574,35 @@ fn adversarial_regressions(bridge: &str, root: &std::path::Path) {
     let _ = std::os::unix::fs::symlink(&real_parent, &sym_parent);
     let via_sym = sym_parent.join("nested").join("handoff.json");
     assert_ne!(bridge_write_atomic(&via_sym.to_string_lossy(), b"{}"), 0);
+
+    // 7. 10-field legacy parse and 11-field quote round-trip with UTF-8, commas, quotes, and percent.
+    let legacy_10 = b"[zoterolinks]\nzref.1=80000001,10,20,100,40,ABCD1234,EFGH5678,42,p.%2042%2C%20note,Kuhn%201962\n";
+    let parsed_10 = zoterolinks_parse(legacy_10).expect("10-field legacy format parses");
+    assert_eq!(parsed_10.links.len(), 1);
+    assert_eq!(parsed_10.links[0].quote, "");
+    assert_eq!(parsed_10.links[0].short_cite, "Kuhn 1962");
+
+    let quote_str = "Testing «guillemets», 100% pure science, “quotes”, & dashes — Kuhn 1962";
+    let modern_ref = ZoteroRef {
+        pid: 1,
+        seed: 0x8000_0002,
+        area: Rect::new(10, 20, 100, 40),
+        item_key: "ABCD1234".to_string(),
+        attachment_key: "EFGH5678".to_string(),
+        page: 42,
+        locator: "p. 42".to_string(),
+        short_cite: "Kuhn 1962".to_string(),
+        quote: quote_str.to_string(),
+    };
+    let mut modern_links = ZoteroLinks { writable: true, ..Default::default() };
+    modern_links.links.push(modern_ref.clone());
+    let serialized = zoterolinks_text(&modern_links, None);
+    let parsed_11 = zoterolinks_parse(&serialized).expect("11-field format parses");
+    assert_eq!(parsed_11.links.len(), 1);
+    assert_eq!(parsed_11.links[0].quote, quote_str);
+    assert_eq!(parsed_11.links[0].short_cite, "Kuhn 1962");
+    assert_eq!(parsed_11.links[0], modern_ref);
+
     let _ = bridge;
 }
 

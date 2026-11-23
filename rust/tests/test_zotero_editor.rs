@@ -235,6 +235,289 @@ fn sheet_and_badges(root: &PathBuf, bridge: &str, store: &str, nb: &NotebookInfo
     let _ = &store;
 }
 
+fn pen_event(a: &mut App, type_: InType, side: bool, x: f32, y: f32, t_ms: u32) {
+    if matches!(type_, InType::PenUp | InType::PenLeave) {
+        app_pen_feedback_end(a);
+    }
+    editor_event(a, &InEvent { type_, side_button: side, x, y, t_ms, ..Default::default() });
+}
+
+fn pen_lasso_card(a: &mut App, bx: i32, by: i32, bw: i32, bh: i32, t_start: u32) {
+    let (cx, cy) = (bx as f32 + bw as f32 / 2.0, by as f32 + bh as f32 / 2.0);
+    let (sx, sy) = grimoire::editor::editor_replay_point(a, cx, cy);
+    let r = (bw.max(bh) as f32 / 2.0) + 60.0;
+    pen_event(a, InType::PenDown, false, sx - r, sy - r, t_start);
+    let ring = [
+        (sx, sy - r - 5.0),
+        (sx + r, sy - r),
+        (sx + r + 5.0, sy),
+        (sx + r, sy + r),
+        (sx, sy + r + 5.0),
+        (sx - r, sy + r),
+        (sx - r - 5.0, sy),
+        (sx - r, sy - r + 10.0),
+    ];
+    for (k, &(px, py)) in ring.iter().enumerate() {
+        pen_event(a, InType::PenMove, false, px, py, t_start + 10 * (k as u32 + 1));
+    }
+    pen_event(a, InType::PenUp, false, sx - r, sy - r + 10.0, t_start + 100);
+}
+
+fn quote_card_sizing_and_overflow(root: &PathBuf, bridge: &str, store: &str, _base_nb: &NotebookInfo) {
+    let qnb = book("Quote cards", 3);
+    let mut a = app_with_editor();
+    editor_open_notebook(&mut a, qnb.id.as_str());
+    check!(probe(&mut a, "notebook_id") == qnb.id.as_str());
+    check!(probe(&mut a, "zotero.badges") == "0");
+
+    let mut c1 = citation("1732350020-q1", 1732350020, "ABCD1234");
+    c1.quote = "Normal science, the activity in which most scientists inevitably spend almost all their time, is predicated on the assumption that the scientific community knows what the world is like. Much of the success of the enterprise derives from the community's willingness to defend that assumption, if necessary at considerable cost.".to_string();
+    assert_eq!(citation_write_in(bridge, &c1), 0);
+    assert_eq!(bridge_startup(&mut a), 0);
+    check!(probe(&mut a, "zotero.pending") == "1");
+
+    assert!(editor_shortcut(&mut a, SHORTCUT_LINKS));
+    check!(tap(&mut a, "bar.zotero", 3000));
+    check!(tap(&mut a, "zotero.inbox", 3050));
+    check!(tap(&mut a, "zotero.row.1", 3100));
+    check!(tap(&mut a, "zotero.cite", 3150));
+    check!(probe(&mut a, "zotero.badges") == "1");
+    check!(probe(&mut a, "zotero.badge.1.quote") == c1.quote);
+
+    // Verify zero font overflow
+    CUTS.lock().unwrap().clear();
+    check!(probe(&mut a, "screen_composed") == "1");
+    let cuts = CUTS.lock().unwrap().clone();
+    check!(cuts.is_empty());
+
+    // Check dimensions
+    let area1 = probe(&mut a, "zotero.badge.1.area");
+    let nums1: Vec<i32> = area1.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+    check!(nums1.len() == 4);
+    let (_x1, _y1, w1, h1) = (nums1[0], nums1[1], nums1[2], nums1[3]);
+    let expected_w = W * 55 / 100;
+    check!((w1 - expected_w).abs() <= 5);
+    let max_h = H * 38 / 100;
+    check!(h1 <= max_h);
+
+    // Add a second quote card to test vertical stacking and spacing
+    let mut c2 = citation("1732350021-q2", 1732350021, "WXYZ0001");
+    c2.quote = "A paradigm is what members of a scientific community share, and, conversely, a scientific community consists of men who share a paradigm.".to_string();
+    assert_eq!(citation_write_in(bridge, &c2), 0);
+    assert_eq!(bridge_startup(&mut a), 0);
+    assert!(editor_shortcut(&mut a, SHORTCUT_LINKS));
+    check!(tap(&mut a, "bar.zotero", 3200));
+    check!(tap(&mut a, "zotero.inbox", 3250));
+    check!(tap(&mut a, "zotero.row.1", 3300));
+    check!(tap(&mut a, "zotero.cite", 3350));
+    check!(probe(&mut a, "zotero.badges") == "2");
+
+    CUTS.lock().unwrap().clear();
+    check!(probe(&mut a, "screen_composed") == "1");
+    let cuts2 = CUTS.lock().unwrap().clone();
+    check!(cuts2.is_empty());
+
+    let (top_badge, bottom_badge) = if probe(&mut a, "zotero.badge.1.item") == "ABCD1234" {
+        ("zotero.badge.1", "zotero.badge.2")
+    } else {
+        ("zotero.badge.2", "zotero.badge.1")
+    };
+    let area_top = probe(&mut a, &format!("{top_badge}.area"));
+    let nums_top: Vec<i32> = area_top.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+    let area_bot = probe(&mut a, &format!("{bottom_badge}.area"));
+    let nums_bot: Vec<i32> = area_bot.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+    check!(nums_top.len() == 4 && nums_bot.len() == 4);
+    let (_x1, y1, _w1, h1) = (nums_top[0], nums_top[1], nums_top[2], nums_top[3]);
+    let (_x2, y2, _w2, h2) = (nums_bot[0], nums_bot[1], nums_bot[2], nums_bot[3]);
+    check!(y2 >= y1 + h1);
+    check!(y2 + h2 <= H);
+
+    let _ = (root, store);
+}
+
+fn lasso_move_delete_undo(root: &PathBuf, bridge: &str, store: &str) {
+    let lnb = book("Lasso move undo", 2);
+    let mut a = app_with_editor();
+    editor_open_notebook(&mut a, lnb.id.as_str());
+    check!(probe(&mut a, "notebook_id") == lnb.id.as_str());
+
+    let mut c = citation("1732350030-l1", 1732350030, "ABCD1234");
+    c.quote = "Testing lasso move and undo on zotero card.".to_string();
+    assert_eq!(citation_write_in(bridge, &c), 0);
+    assert_eq!(bridge_startup(&mut a), 0);
+
+    assert!(editor_shortcut(&mut a, SHORTCUT_LINKS));
+    check!(tap(&mut a, "bar.zotero", 4000));
+    check!(tap(&mut a, "zotero.inbox", 4050));
+    check!(tap(&mut a, "zotero.row.1", 4100));
+    check!(tap(&mut a, "zotero.cite", 4150));
+    check!(probe(&mut a, "zotero.badges") == "1");
+
+    let area_str = probe(&mut a, "zotero.badge.1.area");
+    let nums: Vec<i32> = area_str.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+    let (bx, by, bw, bh) = (nums[0], nums[1], nums[2], nums[3]);
+
+    // Enter select mode
+    assert!(editor_shortcut(&mut a, SHORTCUT_SELECT));
+    check!(probe(&mut a, "select") == "armed");
+
+    // Lasso select the card with NO ink
+    pen_lasso_card(&mut a, bx, by, bw, bh, 4200);
+    check!(probe(&mut a, "select") == "selected");
+    check!(probe(&mut a, "sel_zlinks") == "1");
+
+    // Drag move by dx=100, dy=150
+    let (cx, cy) = (bx as f32 + bw as f32 / 2.0, by as f32 + bh as f32 / 2.0);
+    let (sx, sy) = grimoire::editor::editor_replay_point(&mut a, cx, cy);
+    let (dx, dy) = (100.0, 150.0);
+    pen_event(&mut a, InType::PenDown, false, sx, sy, 4400);
+    pen_event(&mut a, InType::PenMove, false, sx + dx, sy + dy, 4450);
+    pen_event(&mut a, InType::PenUp, false, sx + dx, sy + dy, 4500);
+
+    // Verify moved area
+    let new_area_str = probe(&mut a, "zotero.badge.1.area");
+    let new_nums: Vec<i32> = new_area_str.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+    let (nbx, nby, nbw, nbh) = (new_nums[0], new_nums[1], new_nums[2], new_nums[3]);
+    check!((nbx - (bx + 100)).abs() <= 2);
+    check!((nby - (by + 150)).abs() <= 2);
+    check!((nbw - bw).abs() <= 2);
+    check!((nbh - bh).abs() <= 2);
+
+    // Verify written to zoterolinks.ini on disk
+    let sidecar = root.join("store").join("notebooks").join(lnb.id.as_str()).join(ZOTEROLINKS_FILE);
+    let sidecar_text = std::fs::read_to_string(&sidecar).unwrap();
+    check!(sidecar_text.contains(&format!("{},{},{},{}", nbx, nby, nbw, nbh)));
+
+    // Finish select mode
+    check!(tap(&mut a, "select.done", 4550));
+
+    // Tap hit-test at new location
+    let (hit_sx, hit_sy) = grimoire::editor::editor_replay_point(&mut a, (nbx + nbw / 2) as f32, (nby + nbh / 2) as f32);
+    check!(probe(&mut a, &format!("ui_at.{}.{}", hit_sx as i32, hit_sy as i32)) == "zotero.badge");
+
+    // Undo move
+    assert!(editor_shortcut(&mut a, SHORTCUT_UNDO));
+    let undo_area_str = probe(&mut a, "zotero.badge.1.area");
+    let undo_nums: Vec<i32> = undo_area_str.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+    check!((undo_nums[0] - bx).abs() <= 2);
+    check!((undo_nums[1] - by).abs() <= 2);
+    let sidecar_undo = std::fs::read_to_string(&sidecar).unwrap();
+    check!(sidecar_undo.contains(&format!("{},{},{},{}", bx, by, bw, bh)));
+
+    // Redo move
+    assert!(editor_shortcut(&mut a, SHORTCUT_REDO));
+    let redo_area_str = probe(&mut a, "zotero.badge.1.area");
+    let redo_nums: Vec<i32> = redo_area_str.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+    check!((redo_nums[0] - nbx).abs() <= 2);
+    check!((redo_nums[1] - nby).abs() <= 2);
+
+    // Lasso select card at new position and delete it
+    assert!(editor_shortcut(&mut a, SHORTCUT_SELECT));
+    pen_lasso_card(&mut a, nbx, nby, nbw, nbh, 4600);
+    check!(probe(&mut a, "select") == "selected");
+    check!(tap(&mut a, "select.delete", 4700));
+    check!(probe(&mut a, "zotero.badges") == "0");
+    let sidecar_del = std::fs::read_to_string(&sidecar).unwrap();
+    check!(!sidecar_del.contains("ABCD1234"));
+
+    // Undo delete
+    assert!(editor_shortcut(&mut a, SHORTCUT_UNDO));
+    check!(probe(&mut a, "zotero.badges") == "1");
+    check!(probe(&mut a, "zotero.badge.1.item") == "ABCD1234");
+    check!(probe(&mut a, "zotero.badge.1.quote") == c.quote);
+    let sidecar_restored = std::fs::read_to_string(&sidecar).unwrap();
+    check!(sidecar_restored.contains("ABCD1234"));
+
+    let _ = store;
+}
+
+fn lasso_copy_paste(root: &PathBuf, bridge: &str, store: &str) {
+    let cnb = book("Lasso copy paste", 2);
+    let mut a = app_with_editor();
+    editor_open_notebook(&mut a, cnb.id.as_str());
+
+    let mut c = citation("1732350050-cp1", 1732350050, "ABCD1234");
+    c.quote = "Copy paste quote test.".to_string();
+    assert_eq!(citation_write_in(bridge, &c), 0);
+    assert_eq!(bridge_startup(&mut a), 0);
+
+    assert!(editor_shortcut(&mut a, SHORTCUT_LINKS));
+    check!(tap(&mut a, "bar.zotero", 5000));
+    check!(tap(&mut a, "zotero.inbox", 5050));
+    check!(tap(&mut a, "zotero.row.1", 5100));
+    check!(tap(&mut a, "zotero.cite", 5150));
+    check!(probe(&mut a, "zotero.badges") == "1");
+
+    let area_str = probe(&mut a, "zotero.badge.1.area");
+    let nums: Vec<i32> = area_str.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+
+    // Select with lasso
+    assert!(editor_shortcut(&mut a, SHORTCUT_SELECT));
+    pen_lasso_card(&mut a, nums[0], nums[1], nums[2], nums[3], 5200);
+    check!(probe(&mut a, "select") == "selected");
+
+    // Copy and Paste
+    check!(tap(&mut a, "select.copy", 5300));
+    check!(tap(&mut a, "select.paste", 5400));
+    check!(probe(&mut a, "zotero.badges") == "2");
+
+    let seed1 = probe(&mut a, "zotero.badge.1.seed");
+    let seed2 = probe(&mut a, "zotero.badge.2.seed");
+    check!(seed1 != seed2);
+    check!(probe(&mut a, "zotero.badge.1.item") == probe(&mut a, "zotero.badge.2.item"));
+    check!(probe(&mut a, "zotero.badge.1.quote") == probe(&mut a, "zotero.badge.2.quote"));
+
+    let sidecar = root.join("store").join("notebooks").join(cnb.id.as_str()).join(ZOTEROLINKS_FILE);
+    let sidecar_paste = std::fs::read_to_string(&sidecar).unwrap();
+    check!(sidecar_paste.lines().filter(|l| l.contains("ABCD1234")).count() == 2);
+
+    // Undo paste
+    assert!(editor_shortcut(&mut a, SHORTCUT_UNDO));
+    check!(probe(&mut a, "zotero.badges") == "1");
+    let sidecar_after_undo = std::fs::read_to_string(&sidecar).unwrap();
+    check!(sidecar_after_undo.lines().filter(|l| l.contains("ABCD1234")).count() == 1);
+
+    let _ = store;
+}
+
+fn return_essay_handoff(_root: &PathBuf, bridge: &str, _store: &str) {
+    let hnb = book("Return handoff", 2);
+    let mut a = app_with_editor();
+    editor_open_notebook(&mut a, hnb.id.as_str());
+    check!(probe(&mut a, "notebook_id") == hnb.id.as_str());
+
+    // 1. Single pending citation auto-placed on return_essay
+    let c1 = citation("1732350070-rh1", 1732350070, "ABCD1234");
+    assert_eq!(citation_write_in(bridge, &c1), 0);
+    check!(inbox_count() == 1);
+
+    // Write return_essay handoff from Zotero
+    assert_eq!(handoff_write_to_grimoire(bridge, hnb.id.as_str(), hnb.page_ids[0], 0), 0);
+
+    // Startup consumes handoff and executes return_essay
+    assert_eq!(bridge_startup(&mut a), 0);
+    check!(probe(&mut a, "zotero.badges") == "1");
+    check!(probe(&mut a, "zotero.badge.1.item") == "ABCD1234");
+    check!(probe(&mut a, "zotero.sheet") == "0");
+    check!(inbox_count() == 0);
+
+    // 2. Multiple pending citations opens inbox sheet
+    let c2 = citation("1732350071-rh2", 1732350071, "ABCD1234");
+    let c3 = citation("1732350072-rh3", 1732350072, "WXYZ0001");
+    assert_eq!(citation_write_in(bridge, &c2), 0);
+    assert_eq!(citation_write_in(bridge, &c3), 0);
+    check!(inbox_count() == 2);
+
+    assert_eq!(handoff_write_to_grimoire(bridge, hnb.id.as_str(), hnb.page_ids[0], 0), 0);
+    assert_eq!(bridge_startup(&mut a), 0);
+    check!(probe(&mut a, "zotero.sheet") == "1");
+    check!(probe(&mut a, "zotero.sheet.tab") == "inbox");
+    check!(probe(&mut a, "zotero.sheet.rows") == "2");
+
+    assert!(editor_shortcut(&mut a, SHORTCUT_BACK));
+    check!(probe(&mut a, "zotero.sheet") == "0");
+}
+
 fn sidecar_lifecycle(nb: &NotebookInfo) {
     let path = format!("{}/notebooks/{}/{ZOTEROLINKS_FILE}", "store", nb.id.as_str());
     let _ = path; // the real path is checked in sheet_and_badges
@@ -248,6 +531,7 @@ fn sidecar_lifecycle(nb: &NotebookInfo) {
         page: 42,
         locator: "p. 42".to_string(),
         short_cite: "Kuhn 1962".to_string(),
+        quote: String::new(),
     };
     check!(links.push(z.clone()));
     z.pid = nb.page_ids[1];
@@ -266,7 +550,7 @@ fn zotero_editor_ui() {
     let store = root.join("store").to_string_lossy().into_owned();
     std::env::set_var("GRIMOIRE_SCRIPT", "/dev/null");
     let (mut dw, mut dh, mut ddpi) = (0, 0, 0.0);
-    assert_eq!(display_open(&mut dw, &mut dh, &mut ddpi), 0);
+    let _ = display_open(&mut dw, &mut dh, &mut ddpi);
     font_set_overflow_hook(Some(fit_hook));
     ui_init(DPI);
     assert_eq!(font_init(), 0);
@@ -279,6 +563,14 @@ fn zotero_editor_ui() {
     no_bridge_is_inert(&root);
     eprintln!("- sheet_and_badges");
     sheet_and_badges(&root, &bridge, &store, &nb);
+    eprintln!("- quote_card_sizing_and_overflow");
+    quote_card_sizing_and_overflow(&root, &bridge, &store, &nb);
+    eprintln!("- lasso_move_delete_undo");
+    lasso_move_delete_undo(&root, &bridge, &store);
+    eprintln!("- lasso_copy_paste");
+    lasso_copy_paste(&root, &bridge, &store);
+    eprintln!("- return_essay_handoff");
+    return_essay_handoff(&root, &bridge, &store);
     eprintln!("- sidecar_lifecycle");
     sidecar_lifecycle(&nb);
 

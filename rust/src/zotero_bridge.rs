@@ -493,17 +493,19 @@ fn pct_byte(b: u8) -> bool {
 /// Uppercase `%XX` for control bytes, `%`, `,`, a space and DEL; all other UTF-8 bytes stay raw.
 pub fn pct_encode(s: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::with_capacity(s.len());
+    let mut out = Vec::with_capacity(s.len());
     for &b in s.as_bytes() {
         if pct_byte(b) {
-            out.push('%');
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 15) as usize] as char);
+            out.push(b'%');
+            out.push(HEX[(b >> 4) as usize]);
+            out.push(HEX[(b & 15) as usize]);
         } else {
-            out.push(b as char);
+            out.push(b);
         }
     }
-    out
+    // SAFETY: s is valid UTF-8, and pct_byte only matches ASCII bytes (<= 0x20, 0x7f, '%', ',')
+    // which are replaced by ASCII '%XX'. Non-ASCII multi-byte sequences remain unchanged and intact.
+    String::from_utf8(out).unwrap()
 }
 /// The inverse of `pct_encode`: `None` for a truncated or non-hex escape, or bytes that are not
 /// UTF-8. Lowercase hex is accepted on read, as RFC 3986 requires.
@@ -1457,6 +1459,7 @@ pub struct ZoteroRef {
     pub page: u32,
     pub locator: String,
     pub short_cite: String,
+    pub quote: String,
 }
 pub type ZoteroLink = ZoteroRef;
 
@@ -1471,6 +1474,7 @@ impl ZoteroRef {
             page: c.page,
             locator: clean_text(&c.locator, 512),
             short_cite: clean_text(&c.short_cite, 256),
+            quote: clean_text(&c.quote, 4096),
         }
     }
 }
@@ -1553,7 +1557,7 @@ fn zref_parse(line: &[u8]) -> Option<ZoteroRef> {
         return None;
     }
     let fields: Vec<&[u8]> = rest[eq + 1..].split(|&c| c == b',').collect();
-    if fields.len() != 10 {
+    if fields.len() != 10 && fields.len() != 11 {
         return None;
     }
     let seed = parse_hex_seed(fields[0])?;
@@ -1566,15 +1570,22 @@ fn zref_parse(line: &[u8]) -> Option<ZoteroRef> {
     let page = std::str::from_utf8(fields[7]).ok()?.parse::<u32>().ok()?;
     let locator = pct_decode(std::str::from_utf8(fields[8]).ok()?)?;
     let short_cite = pct_decode(std::str::from_utf8(fields[9]).ok()?)?;
+    let quote = if fields.len() == 11 {
+        let q = pct_decode(std::str::from_utf8(fields[10]).ok()?)?;
+        clean_text(&q, 4096)
+    } else {
+        String::new()
+    };
     if !item_key_valid(item_key)
         || (!attachment_key.is_empty() && !attachment_key_valid(attachment_key))
         || !valid_zotero_page(page)
         || !locator_valid(&locator)
         || !bridge_text_valid(&short_cite, 256)
+        || !quote_valid(&quote, 4096)
     {
         return None;
     }
-    Some(ZoteroRef { pid, seed, area, item_key: item_key.to_string(), attachment_key: attachment_key.to_string(), page, locator, short_cite })
+    Some(ZoteroRef { pid, seed, area, item_key: item_key.to_string(), attachment_key: attachment_key.to_string(), page, locator, short_cite, quote })
 }
 
 /// A carried line of another version's, capped like weblinks.ini's.
@@ -1655,20 +1666,38 @@ pub fn zoterolinks_generation(id: &str) -> u32 {
 
 fn zref_line(l: &ZoteroRef) -> String {
     let r = l.area;
-    format!(
-        "zref.{}={:08x},{},{},{},{},{},{},{},{},{}\n",
-        l.pid,
-        l.seed,
-        r.x,
-        r.y,
-        r.w,
-        r.h,
-        l.item_key,
-        l.attachment_key,
-        l.page,
-        pct_encode(&l.locator),
-        pct_encode(&l.short_cite)
-    )
+    if l.quote.is_empty() {
+        format!(
+            "zref.{}={:08x},{},{},{},{},{},{},{},{},{}\n",
+            l.pid,
+            l.seed,
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            l.item_key,
+            l.attachment_key,
+            l.page,
+            pct_encode(&l.locator),
+            pct_encode(&l.short_cite)
+        )
+    } else {
+        format!(
+            "zref.{}={:08x},{},{},{},{},{},{},{},{},{},{}\n",
+            l.pid,
+            l.seed,
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            l.item_key,
+            l.attachment_key,
+            l.page,
+            pct_encode(&l.locator),
+            pct_encode(&l.short_cite),
+            pct_encode(&l.quote)
+        )
+    }
 }
 /// The file's text: links of pages still in `nb`, then carried lines.
 pub fn zoterolinks_text(links: &ZoteroLinks, nb: Option<&NotebookInfo>) -> Vec<u8> {
@@ -1826,6 +1855,7 @@ pub fn zotero_target_from_parts(item_key: &str, attachment_key: &str, page: u32,
         page,
         locator: locator.to_string(),
         short_cite: String::new(),
+        quote: String::new(),
     })
 }
 /// Read a `z:` target back. Also accepts the unambiguous field orders `z:ITEM:ATT` and
@@ -1875,6 +1905,7 @@ pub fn zotero_target_parse(target: &str) -> Option<ZoteroRef> {
         page,
         locator,
         short_cite: String::new(),
+        quote: String::new(),
     })
 }
 pub fn zotero_target_decode(target: &str) -> Option<ZoteroRef> {
@@ -1914,8 +1945,12 @@ pub fn bridge_startup(a: &mut App) -> i32 {
     if !bridge_exists() {
         return 0;
     }
+    let mut return_essay = false;
     if let Some(h) = handoff_take() {
         if h.target_enum() == Some(HandoffTarget::Grimoire) {
+            if h.action_enum() == Some(HandoffAction::ReturnEssay) || h.action == ACTION_RETURN_ESSAY {
+                return_essay = true;
+            }
             if !h.grimoire.notebook_id.is_empty() {
                 editor_open_notebook_at(a, &h.grimoire.notebook_id, h.grimoire.page_id, false);
             }
@@ -1931,9 +1966,17 @@ pub fn bridge_startup(a: &mut App) -> i32 {
         let msg = cformat!(tr("%d Zotero citations imported."), n as i32);
         app_toast(a, &msg, 3000);
     }
+    if return_essay {
+        crate::editor::editor_zotero_return_handoff(a);
+    }
     0
 }
 /// Alias that reads as what it does at startup.
 pub fn zotero_startup(a: &mut App) -> i32 {
     bridge_startup(a)
+}
+
+/// Alias for pending_citations
+pub fn bridge_pending_citations() -> Vec<ZoteroCitation> {
+    pending_citations()
 }

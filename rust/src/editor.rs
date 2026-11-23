@@ -921,19 +921,21 @@ fn zotero_load(s: &mut EditorState) {
 }
 
 /// Write a changed zoterolinks.ini. A failed write keeps the dirty flag for the next close or handoff.
-fn zotero_save(a: &mut App) -> i32 {
+pub(crate) fn zotero_save(a: &mut App) -> i32 {
     if !bridge_exists() {
         return 0;
     }
-    let s = ed(a);
-    if !s.open || !s.zl.dirty || s.nb.id.is_empty() {
-        return 0;
-    }
-    let id = s.nb.id.to_string();
-    let nb = s.nb.clone();
-    let mut links = std::mem::take(&mut s.zl.links);
+    let id = {
+        let s = ed_ref(a);
+        if !s.open || s.nb.id.is_empty() {
+            return 0;
+        }
+        s.nb.id.to_string()
+    };
+    let nb = ed_ref(a).nb.clone();
+    let mut links = std::mem::take(&mut ed(a).zl.links);
     if crate::zotero_bridge::zoterolinks_prune(&mut links, &nb) > 0 {
-        s.zl.dirty = true;
+        ed(a).zl.dirty = true;
     }
     let rc = crate::zotero_bridge::zoterolinks_save(id.as_str(), &mut links, &nb);
     let s = ed(a);
@@ -946,23 +948,51 @@ fn zotero_save(a: &mut App) -> i32 {
     rc
 }
 
-/// The badge area for the `ordinal`th citation on a page, in page pixels. Citations carry no writing
-/// position, so they land in a stable top-left grid; a later citation never covers an earlier one.
-fn zotero_badge_area(s: &EditorState, ordinal: usize) -> Rect {
-    const W: i32 = 64;
-    const H: i32 = 64;
-    const GAP: i32 = 12;
-    const COLS: usize = 6;
-    // Clear of the left panel and the clock corner, so a badge stays tappable wherever the page sits
-    // in the viewport.
-    let (w, h) = (W.min(s.pgw.max(W) / 3), H.min(s.pgh.max(H) / 3));
-    let (x0, y0) = (300.min(s.pgw.saturating_sub(w)), 300.min(s.pgh.saturating_sub(h)));
-    let col = ordinal % COLS;
-    let row = ordinal / COLS;
-    let mut x = x0 + col as i32 * (w + GAP);
-    let mut y = y0 + row as i32 * (h + GAP);
-    if x + w > s.pgw { x = x0; y = y0 + (row as i32 + 1) * (h + GAP); }
-    if y + h > s.pgh { y = y0; x = x0 + ((col + 1) % COLS) as i32 * (w + GAP); }
+pub(crate) fn map_dirty(a: &mut App) {
+    if let Some(s) = a.ed.as_deref_mut() {
+        s.boxes.stale = true;
+    }
+}
+
+/// Size a Zotero card/pill area, optionally carrying a quote, avoiding overlapping existing cards.
+fn zotero_card_area(s: &EditorState, pid: u32, short_cite: &str, quote: &str) -> Rect {
+    let (margin_x, margin_y) = (240.min(s.pgw / 4), 160.min(s.pgh / 8));
+    let (w, h) = if quote.is_empty() {
+        let label = format!("Z  {}", short_cite);
+        let text_w = crate::font::font_measure(crate::font::FontFace::Bold, 24.0, &label);
+        let w = (text_w + 56).clamp(220, 760.min(s.pgw - margin_x - 40));
+        let h = 68;
+        (w, h)
+    } else {
+        let mut w = ((s.pgw as f32) * 0.55).round() as i32;
+        w = w.clamp(360, (s.pgw - margin_x - 60).max(360));
+        let inner_w = (w - 44).max(100);
+        let lines = crate::font::font_wrap_lines(crate::font::FontFace::Regular, 28.0, quote, inner_w, None).max(1);
+        let needed_h = 18 + lines * 34 + 12 + 28 + 18;
+        let cap_h = ((s.pgh as f32) * 0.38).round() as i32;
+        let h = needed_h.clamp(100, cap_h);
+        (w, h)
+    };
+
+    let existing: Vec<Rect> = crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).iter().map(|z| z.area).collect();
+    let gap = 16;
+    let mut x = margin_x;
+    let mut y = margin_y;
+    for r in &existing {
+        if rect_overlaps(Rect::new(x, y, w, h), rect_inflate(*r, gap)) {
+            y = r.y + r.h + gap;
+            if y + h > s.pgh - 80 {
+                x = r.x + r.w + gap;
+                y = margin_y;
+                if x + w > s.pgw - 40 {
+                    x = margin_x;
+                    y = margin_y + 40;
+                }
+            }
+        }
+    }
+    let x = x.clamp(margin_x, (s.pgw - w - 20).max(margin_x));
+    let y = y.clamp(margin_y, (s.pgh - h - 20).max(margin_y));
     Rect { x, y, w, h }
 }
 
@@ -978,7 +1008,7 @@ fn zotero_consume(_a: &mut App, id: &str) {
 }
 
 /// Add a sheet row as a citation badge on the open page. `consume` is true for a pending citation.
-fn zotero_add_row(a: &mut App, row: &ZoteroSheetRow, consume: bool) -> bool {
+pub(crate) fn zotero_add_row(a: &mut App, row: &ZoteroSheetRow, consume: bool) -> bool {
     if !bridge_exists() || row.item_key.is_empty() {
         return false;
     }
@@ -990,8 +1020,7 @@ fn zotero_add_row(a: &mut App, row: &ZoteroSheetRow, consume: bool) -> bool {
     if pid == 0 {
         return false;
     }
-    let ordinal = crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).len();
-    let area = zotero_badge_area(s, ordinal);
+    let area = zotero_card_area(s, pid, &row.label, &row.quote);
     let seed = crate::zotero_bridge::zotero_seed(pid, row.item_key.as_str());
     let zref = Zref {
         pid,
@@ -1002,9 +1031,10 @@ fn zotero_add_row(a: &mut App, row: &ZoteroSheetRow, consume: bool) -> bool {
         page: row.page,
         locator: row.locator.clone(),
         short_cite: row.label.clone(),
+        quote: row.quote.clone(),
     };
     let s = ed(a);
-    if !s.zl.links.push(zref) {
+    if !s.zl.links.push(zref.clone()) {
         return false;
     }
     s.zl.dirty = true;
@@ -1012,6 +1042,14 @@ fn zotero_add_row(a: &mut App, row: &ZoteroSheetRow, consume: bool) -> bool {
         zotero_consume(a, row.id.as_str());
     }
     zotero_save(a);
+    let s = ed(a);
+    if let (Some(h), Some(ip)) = (s.cur_hist(), s.page_ix()) {
+        let (hh, _page) = hist_page(&mut s.hist, h, ip);
+        crate::history::history_push_zlink(hh, crate::history::ZoteroEdit {
+            pid,
+            records: vec![(None, Some(zref))],
+        });
+    }
     true
 }
 
@@ -1091,6 +1129,25 @@ fn zotero_show(a: &mut App) {
     compose_all(a, RefreshMode::Ui);
 }
 
+pub fn editor_zotero_return_handoff(a: &mut App) {
+    if !bridge_exists() || a.scr != ScreenId::Editor || !ed_ref(a).open {
+        return;
+    }
+    let pending = crate::zotero_bridge::bridge_pending_citations();
+    if pending.is_empty() {
+        return;
+    }
+    if pending.len() == 1 {
+        let row = crate::zotero_sheet::from_citation(&pending[0]);
+        if zotero_add_row(a, &row, true) {
+            map_dirty(a);
+            compose_all(a, RefreshMode::Ui);
+        }
+    } else {
+        zotero_show(a);
+    }
+}
+
 /// The citation badge under a screen point, newest first.
 fn zotero_badge_under(a: &App, x: f32, y: f32) -> Option<Zref> {
     if !bridge_exists() {
@@ -1110,6 +1167,66 @@ fn zotero_badge_under(a: &App, x: f32, y: f32) -> Option<Zref> {
     }).cloned()
 }
 
+/// Draw a single Zotero card onto a.screen, optionally at area_override (page px).
+pub(crate) fn zotero_single_card_draw(a: &mut App, z: &Zref, area_override: Option<Rect>, clip_r: Rect) {
+    let page_area = area_override.unwrap_or(z.area);
+    let sr = page_to_screen(a, page_area);
+    if !rect_overlaps(clip_r, sr) {
+        return;
+    }
+    let (s_zoom, page_clip) = {
+        let s = ed_ref(a);
+        (s.zoom, page_to_screen(a, Rect { x: 0, y: 0, w: s.pgw, h: s.pgh }))
+    };
+    let card_clip = rect_intersect(clip_r, rect_intersect(a.screen.clip, page_clip));
+    if rect_is_empty(card_clip) {
+        return;
+    }
+    let clip = a.screen.clip;
+    canvas_set_clip(&mut a.screen, card_clip);
+
+    let z_scale = if page_area.w > 0 { sr.w as f32 / page_area.w as f32 } else { s_zoom };
+    let r_radius = (8.0 * z_scale).round().max(2.0) as i32;
+    let border_thick = (2.0 * z_scale).round().max(1.0) as i32;
+
+    // clean white card
+    ui_frame(&mut a.screen, sr, r_radius, 255, true, 0);
+    // crisp dark border
+    ui_frame(&mut a.screen, sr, r_radius, 0, false, border_thick);
+
+    if !z.quote.is_empty() {
+        let bar_w = (6.0 * z_scale).round().max(2.0) as i32;
+        let bar = Rect { x: sr.x, y: sr.y, w: bar_w, h: sr.h };
+        canvas_fill(&mut a.screen, bar, 0);
+
+        let pad_left = bar_w + (14.0 * z_scale).round().max(6.0) as i32;
+        let pad_right = (14.0 * z_scale).round().max(6.0) as i32;
+        let pad_top = (10.0 * z_scale).round().max(4.0) as i32;
+        let footer_h = (26.0 * z_scale).round().max(14.0) as i32;
+        let inner_w = (sr.w - pad_left - pad_right).max(10);
+        let inner_h = (sr.h - pad_top - footer_h - (10.0 * z_scale) as i32).max(10);
+
+        let font_size = (24.0 * z_scale).clamp(8.0, 32.0);
+        let line_h = (32.0 * z_scale).round().max(12.0) as i32;
+        let max_lines = (inner_h / line_h).max(1);
+
+        let quote_rect = Rect { x: sr.x + pad_left, y: sr.y + pad_top, w: inner_w, h: inner_h };
+        crate::font::font_draw_wrapped_name(&mut a.screen, crate::font::FontFace::Regular, font_size, quote_rect, &z.quote, max_lines, 0);
+
+        let footer_rect = Rect { x: sr.x + pad_left, y: sr.y + sr.h - footer_h - (6.0 * z_scale) as i32, w: inner_w, h: footer_h };
+        let footer_text = format!("Z  {}", z.short_cite);
+        let footer_font = (18.0 * z_scale).clamp(8.0, 24.0);
+        crate::ui::ui_text_name(&mut a.screen, crate::font::FontFace::Bold, footer_font, (footer_font * 0.7).max(8.0), footer_rect, &footer_text, 1, 0);
+    } else {
+        let pad_x = (20.0 * z_scale).round().max(8.0) as i32;
+        let inner = Rect { x: sr.x + pad_x, y: sr.y, w: (sr.w - 2 * pad_x).max(10), h: sr.h };
+        let label = format!("Z  {}", z.short_cite);
+        let pill_font = (24.0 * z_scale).clamp(10.0, 32.0);
+        crate::ui::ui_text_name(&mut a.screen, crate::font::FontFace::Bold, pill_font, (pill_font * 0.7).max(8.0), inner, &label, 1, 0);
+    }
+    a.screen.clip = clip;
+}
+
 /// Draw the page's citation badges, independently of the Eye's link-area setting.
 fn zotero_badges_draw(a: &mut App, r: Rect) {
     if !bridge_exists() {
@@ -1119,19 +1236,19 @@ fn zotero_badges_draw(a: &mut App, r: Rect) {
     if pid == 0 {
         return;
     }
+    let sel_state = ed_ref(a).sel.state;
+    let sel_seeds: Vec<u32> = if sel_state != crate::editor::select::SelState::Off {
+        ed_ref(a).sel.zlinks.iter().map(|z| z.seed).collect()
+    } else {
+        Vec::new()
+    };
     let refs: Vec<Zref> = crate::zotero_bridge::zoterolinks_of(&ed_ref(a).zl.links, pid).to_vec();
-    let clip = a.screen.clip;
-    canvas_set_clip(&mut a.screen, r);
     for z in refs {
-        let sr = page_to_screen(a, z.area);
-        if !rect_overlaps(r, sr) {
+        if sel_seeds.contains(&z.seed) {
             continue;
         }
-        ui_frame(&mut a.screen, sr, ui_px(8.0), 255, true, 0);
-        ui_frame(&mut a.screen, sr, ui_px(8.0), 0, false, ui_px(3.0));
-        ui_button(&mut a.screen, sr, IconKind::None, "Z", ButtonStyle::Plain);
+        zotero_single_card_draw(a, &z, None, r);
     }
-    a.screen.clip = clip;
 }
 
 /// Copy page `src`'s Zotero badges onto `copy` in the same notebook.
@@ -5471,7 +5588,7 @@ fn undo_redo(a: &mut App, undo: bool) {
     let Some(h) = s.cur_hist() else { return };
     let Some(ip) = s.page_ix() else { return };
     let kind = if undo { history_undo_kind(&s.hist[h].h) } else { history_redo_kind(&s.hist[h].h) };
-    let has_links=if undo {s.hist[h].h.undo.last()}else{s.hist[h].h.redo.last()}.is_some_and(|step|step.link.is_some());
+    let has_links=if undo {s.hist[h].h.undo.last()}else{s.hist[h].h.redo.last()}.is_some_and(|step|step.link.is_some() || step.zlink.is_some());
     if kind == Some(ActKind::Link) || has_links {
         undo_redo_link(a, h, ip, undo);
         return;
@@ -7530,6 +7647,30 @@ fn undo_redo_link(a: &mut App, ih: usize, ip: usize, undo: bool) {
             }
         }
     }
+    let has_zlink = if let Some(e) = crate::history::history_moved_zlink(&s.hist[ih].h, undo) {
+        let _pid = e.pid;
+        for (b, af) in &e.records {
+            let want = if undo { b } else { af };
+            match want {
+                Some(r) => {
+                    if let Some(pos) = s.zl.links.links.iter().position(|l| l.seed == r.seed) {
+                        s.zl.links.links[pos] = r.clone();
+                    } else {
+                        s.zl.links.push(r.clone());
+                    }
+                }
+                None => {
+                    if let Some(r) = b.as_ref().or(af.as_ref()) {
+                        s.zl.links.links.retain(|l| l.seed != r.seed);
+                    }
+                }
+            }
+        }
+        s.zl.dirty = true;
+        true
+    } else {
+        false
+    };
     s.boxes.stale = true;
     ok = ok && nav_save_links(s.nb.id.as_str(), &mut s.nav, &s.nb) == 0;
     if !ok {
@@ -7561,6 +7702,9 @@ fn undo_redo_link(a: &mut App, ih: usize, ip: usize, undo: bool) {
     if undo {
         say_undo(a, ih);
     }
+    if has_zlink {
+        zotero_save(a);
+    }
     let s = ed(a);
     s.links_dirty = false;
     s.changed = true; // (the notebook changed: the PDF mirror runs at close)
@@ -7574,7 +7718,13 @@ fn undo_redo_link(a: &mut App, ih: usize, ip: usize, undo: bool) {
         } else {
             draw_page(a, d);
         }
-        let u = if a.settings.link_areas { rect_union(page_to_screen(a, d), rect_union(before, eye_bounds(a))) } else { page_to_screen(a, d) };
+        let u = if rect_is_empty(d) {
+            page_to_screen(a, Rect { x: 0, y: 0, w: ed_ref(a).pgw, h: ed_ref(a).pgh })
+        } else if a.settings.link_areas {
+            rect_union(page_to_screen(a, d), rect_union(before, eye_bounds(a)))
+        } else {
+            page_to_screen(a, d)
+        };
         compose(a, u);
         app_invalidate(a, u, RefreshMode::Ui);
         mark_changed(ed(a));
@@ -7589,8 +7739,12 @@ fn undo_redo_link(a: &mut App, ih: usize, ip: usize, undo: bool) {
     // (with the eye off a link change shows nowhere on the page: Undo and Redo say nothing, the owner,
     // 2026-11-04; a toast still up about the change, "Linked to ...", would now be wrong, so it goes)
     app_toast_dismiss(a);
-    if a.settings.link_areas {
-        let u = rect_union(before, eye_bounds(a));
+    if a.settings.link_areas || has_zlink {
+        let u = if has_zlink {
+            page_to_screen(a, Rect { x: 0, y: 0, w: ed_ref(a).pgw, h: ed_ref(a).pgh })
+        } else {
+            rect_union(before, eye_bounds(a))
+        };
         compose(a, u);
         app_invalidate(a, u, RefreshMode::Ui);
     }
@@ -7764,9 +7918,11 @@ fn web_link_under(a: &App, x: f32, y: f32) -> Option<(WebLink, bool)> {
 // growth to a finger's 7 mm too), then a document link (a planner's tab, its growth too), then a web link (2.2: its
 // card): Grimoire's own links to pages win over a web link's area wherever they reach.
 fn link_follow(a: &mut App, x: f32, y: f32) {
-    if let Some(z) = zotero_badge_under(a, x, y) {
-        zotero_open_ref(a, &z);
-        return;
+    if ed_ref(a).sel.state == crate::editor::select::SelState::Off {
+        if let Some(z) = zotero_badge_under(a, x, y) {
+            zotero_open_ref(a, &z);
+            return;
+        }
     }
     let mut l = NavLink::default();
     if !link_under(a, x, y, &mut l) {
@@ -13253,6 +13409,8 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
                         "page" => csnprintf!(out, cap, "%u", z.page),
                         "locator" => csnprintf!(out, cap, "%s", z.locator.as_str()),
                         "cite" => csnprintf!(out, cap, "%s", z.short_cite.as_str()),
+                        "quote" => csnprintf!(out, cap, "%s", z.quote.as_str()),
+                        "seed" => csnprintf!(out, cap, "%u", z.seed),
                         "area" => csnprintf!(out, cap, "%d %d %d %d", z.area.x, z.area.y, z.area.w, z.area.h),
                         _ => return -1,
                     };

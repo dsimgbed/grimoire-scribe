@@ -53,6 +53,7 @@ pub struct ZoteroSheetRow {
     /// Zotero's page number (0 for a catalog item, which has no particular page)
     pub page: u32,
     pub locator: String,
+    pub quote: String,
     /// what the row shows, and the smaller line under it
     pub label: String,
     pub sub: String,
@@ -111,7 +112,7 @@ fn pair(a: &str, b: &str) -> String {
     }
 }
 
-fn from_citation(c: &ZoteroCitation) -> ZoteroSheetRow {
+pub(crate) fn from_citation(c: &ZoteroCitation) -> ZoteroSheetRow {
     let label = if !c.short_cite.is_empty() {
         c.short_cite.clone()
     } else if !c.title.is_empty() {
@@ -125,7 +126,8 @@ fn from_citation(c: &ZoteroCitation) -> ZoteroSheetRow {
         item_key: c.item_key.clone(),
         attachment_key: c.attachment_key.clone(),
         page: c.page,
-        locator: c.locator.clone(),
+        locator: clean_text(&c.locator, 512),
+        quote: clean_text(&c.quote, 4096),
         sub: pair(&pair(&c.authors, &c.year), &pair(&c.locator, &c.quote)),
         label,
     }
@@ -146,6 +148,7 @@ fn from_item(i: &ZoteroLibraryItem) -> ZoteroSheetRow {
         attachment_key: i.attachment_key.clone(),
         page: 0,
         locator: String::new(),
+        quote: String::new(),
         sub: pair(&pair(&i.authors, &i.year), &i.citation_key),
         label,
     }

@@ -50,6 +50,13 @@ pub struct LinkEdit {
     pub records: Vec<(Option<LinkRec>, Option<LinkRec>)>,
 }
 
+/// One undo step's Zotero reference changes on page `pid`: each record is (before, after) for one ref.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ZoteroEdit {
+    pub pid: u32,
+    pub records: Vec<(Option<crate::zotero_bridge::ZoteroRef>, Option<crate::zotero_bridge::ZoteroRef>)>,
+}
+
 #[derive(Debug, Default)]
 pub struct Action {
     pub kind: ActKind,
@@ -66,6 +73,8 @@ pub struct Action {
     pub paper_new: PaperKind,
     /// ActKind::Link: its records (None for every other kind). Boxed: most actions are ink.
     pub link: Option<Box<LinkEdit>>,
+    /// Zotero reference records for link or lasso actions.
+    pub zlink: Option<Box<ZoteroEdit>>,
     /// The page pixels this step changed (Patch), when the editor took them: undo and redo swap them
     /// with the page canvas instead of drawing the region again.
     pub patch: Option<Box<Patch>>,
@@ -325,9 +334,17 @@ pub fn history_push_replace(h: &mut History, page: &mut Page, index: i32, shape:
 /// (`added`: they are the page's last `added` strokes now), with the carried links' records (already in
 /// the Nav and saved). Nothing taken off and nothing added: no step.
 pub fn history_push_lasso(h: &mut History, p: &Page, indices: &[i32], removed: Vec<Box<Stroke>>, added: usize, links: Option<LinkEdit>) {
+    history_push_lasso_with_zlinks(h, p, indices, removed, added, links, None);
+}
+
+pub fn history_push_lasso_with_zlinks(h: &mut History, p: &Page, indices: &[i32], removed: Vec<Box<Stroke>>, added: usize, links: Option<LinkEdit>, zlinks: Option<ZoteroEdit>) {
     let added = added.min(p.strokes.len());
     let at: Vec<usize> = (p.strokes.len() - added..p.strokes.len()).collect();
-    history_push_lasso_at(h, p, indices, removed, &at, links);
+    history_push_lasso_at_with_zlinks(h, p, indices, removed, &at, links, zlinks);
+}
+
+pub fn history_push_lasso_at(h: &mut History, p: &Page, indices: &[i32], removed: Vec<Box<Stroke>>, added_at: &[usize], links: Option<LinkEdit>) {
+    history_push_lasso_at_with_zlinks(h, p, indices, removed, added_at, links, None);
 }
 
 /// history_push_lasso for strokes added anywhere (ascending page indices `added_at`, after the gesture):
@@ -335,11 +352,11 @@ pub fn history_push_lasso(h: &mut History, p: &Page, indices: &[i32], removed: V
 /// the placed group are added; `removed` are the cut originals and the ink taken whole, at their indices
 /// before the gesture (ascending). Undo takes the added strokes off and puts the removed back; redo the
 /// reverse; one step, its canvas patch swapped.
-pub fn history_push_lasso_at(h: &mut History, p: &Page, indices: &[i32], removed: Vec<Box<Stroke>>, added_at: &[usize], links: Option<LinkEdit>) {
+pub fn history_push_lasso_at_with_zlinks(h: &mut History, p: &Page, indices: &[i32], removed: Vec<Box<Stroke>>, added_at: &[usize], links: Option<LinkEdit>, zlinks: Option<ZoteroEdit>) {
     debug_assert_eq!(indices.len(), removed.len(), "one index for each stroke removed");
     debug_assert!(added_at.windows(2).all(|w| w[0] < w[1]), "added indices ascending");
     let added_at: Vec<usize> = added_at.iter().copied().filter(|&k| k < p.strokes.len()).collect();
-    if indices.is_empty() && added_at.is_empty() && links.as_ref().is_none_or(|e| e.records.is_empty()) {
+    if indices.is_empty() && added_at.is_empty() && links.as_ref().is_none_or(|e| e.records.is_empty()) && zlinks.as_ref().is_none_or(|e| e.records.is_empty()) {
         return;
     }
     let add = Action {
@@ -355,6 +372,7 @@ pub fn history_push_lasso_at(h: &mut History, p: &Page, indices: &[i32], removed
         owns: !removed.is_empty(),
         owned: removed,
         link: links.filter(|e| !e.records.is_empty()).map(Box::new),
+        zlink: zlinks.filter(|e| !e.records.is_empty()).map(Box::new),
         added: Some(Box::new(add)),
         ..Default::default()
     };
@@ -387,6 +405,14 @@ pub fn history_push_link(h: &mut History, e: LinkEdit) {
     push_undo(h, Action { kind: ActKind::Link, link: Some(Box::new(e)), ..Default::default() });
 }
 
+/// Records a Zotero reference step ALREADY saved.
+pub fn history_push_zlink(h: &mut History, e: ZoteroEdit) {
+    if e.records.is_empty() {
+        return;
+    }
+    push_undo(h, Action { kind: ActKind::Link, zlink: Some(Box::new(e)), ..Default::default() });
+}
+
 /// A step in a few words, for grimoire.log (the editor's undo line, #119): its kind and how many strokes or links it
 /// moved, never what they are.
 pub fn history_step_words(a: &Action) -> String {
@@ -396,7 +422,11 @@ pub fn history_step_words(a: &Action) -> String {
         ActKind::Erase => cformat!("an erase of %s", &strokes(a.ids.len())),
         ActKind::Paper => "a paper change".to_string(),
         ActKind::Clear => cformat!("a page clear (%s)", &strokes(a.ids.len())),
-        ActKind::Link => cformat!("a link change (%d)", a.link.as_ref().map_or(0, |e| e.records.len()) as i32),
+        ActKind::Link => {
+            let nl = a.link.as_ref().map_or(0, |e| e.records.len());
+            let nz = a.zlink.as_ref().map_or(0, |e| e.records.len());
+            cformat!("a link change (%d)", (nl + nz) as i32)
+        }
         ActKind::Replace => "a shape snap".to_string(),
         ActKind::Lasso => {
             let on = a.added.as_ref().map_or(0, |ad| ad.ids.len());
@@ -419,6 +449,12 @@ pub fn history_redo_kind(h: &History) -> Option<ActKind> {
 pub fn history_moved_link(h: &History, undone: bool) -> Option<&LinkEdit> {
     let top = if undone { h.redo.last() } else { h.undo.last() };
     top.and_then(|a| a.link.as_deref())
+}
+
+/// The Zotero reference records of the step history_undo or history_redo just moved.
+pub fn history_moved_zlink(h: &History, undone: bool) -> Option<&ZoteroEdit> {
+    let top = if undone { h.redo.last() } else { h.undo.last() };
+    top.and_then(|a| a.zlink.as_deref())
 }
 
 /// Drops the step on top of the redo stack: a link step an undo moved whose save then failed (the

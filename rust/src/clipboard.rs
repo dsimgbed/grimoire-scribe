@@ -45,7 +45,8 @@ pub fn clipboard_clear_at_start() {
 /// (four i32), then the carried links as links.ini lines keyed by their number from 1 (u32 length, text).
 fn clip_chunk(g: &Group) -> Vec<u8> {
     let mut d = Vec::new();
-    d.push(CLIP_FORMAT);
+    let fmt = if g.zlinks.is_empty() { CLIP_FORMAT } else { 2 };
+    d.push(fmt);
     let id = g.src_nb.as_bytes();
     let id = &id[..id.len().min(255)];
     d.push(id.len() as u8);
@@ -58,6 +59,16 @@ fn clip_chunk(g: &Group) -> Vec<u8> {
     let text = nav_links_lines(&keyed);
     d.extend_from_slice(&(text.len() as u32).to_le_bytes());
     d.extend_from_slice(text.as_bytes());
+    if fmt == 2 {
+        let ztext = crate::zotero_bridge::zoterolinks_text(&crate::zotero_bridge::ZoteroLinks {
+            links: g.zlinks.clone(),
+            writable: true,
+            file: true,
+            ..Default::default()
+        }, None);
+        d.extend_from_slice(&(ztext.len() as u32).to_le_bytes());
+        d.extend_from_slice(&ztext);
+    }
     let mut c = Vec::with_capacity(d.len() + 8);
     c.extend_from_slice(CLIP_TAG);
     c.extend_from_slice(&(d.len() as u32).to_le_bytes());
@@ -124,7 +135,8 @@ pub fn clipboard_parse(buf: &[u8]) -> Option<Group> {
         return None;
     }
     let mut d = t;
-    if take(&mut d, 1)?[0] != CLIP_FORMAT {
+    let fmt = take(&mut d, 1)?[0];
+    if fmt != CLIP_FORMAT && fmt != 2 {
         return None;
     }
     let n = take(&mut d, 1)?[0] as usize;
@@ -139,10 +151,17 @@ pub fn clipboard_parse(buf: &[u8]) -> Option<Group> {
     }
     let tl = u32_of(&mut d)? as usize;
     let text = std::str::from_utf8(take(&mut d, tl)?).ok()?;
+    let links = nav_links_from_lines(text)?;
+    let mut zlinks = Vec::new();
+    if fmt == 2 {
+        let zl_len = u32_of(&mut d)? as usize;
+        let zl_bytes = take(&mut d, zl_len)?;
+        let parsed = crate::zotero_bridge::zoterolinks_parse(zl_bytes)?;
+        zlinks = parsed.links;
+    }
     if !d.is_empty() {
         return None;
     }
-    let links = nav_links_from_lines(text)?;
     let ink = p.strokes.iter().filter(|s| stroke_is_ink(s)).count();
     let carried = p.strokes.iter().filter(|s| stroke_is_erase(s) && !is_floor_marker(s)).count();
     Some(Group {
@@ -150,6 +169,7 @@ pub fn clipboard_parse(buf: &[u8]) -> Option<Group> {
         h: p.h,
         strokes: p.strokes,
         links,
+        zlinks,
         box_: Rect { x: v[0], y: v[1], w: v[2], h: v[3] },
         src_nb: id,
         src_pid,

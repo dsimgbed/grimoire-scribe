@@ -77,6 +77,8 @@ pub(super) struct SelMode {
     pub(super) ids: Vec<StrokeId>,
     /// the carried links, as they are now
     links: Vec<NavLink>,
+    /// carried Zotero refs
+    pub zlinks: Vec<crate::zotero_bridge::ZoteroRef>,
     /// the box of the selected ink and its link areas, page px
     pub(super) box_: Rect,
     /// a drag: where it began (page px) and how far it has moved the box (whole page px)
@@ -303,7 +305,7 @@ fn sel_ref(a: &App) -> &SelMode {
 /// The selection's indices on the open page, ascending; None when there is none or it no longer holds
 /// (another page, or one of its strokes is gone).
 fn sel_indices(s: &EditorState) -> Option<Vec<usize>> {
-    if (s.sel.ids.is_empty() && s.sel.plan.is_empty()) || s.sel.pid != s.open_pid() {
+    if (s.sel.ids.is_empty() && s.sel.plan.is_empty() && s.sel.zlinks.is_empty()) || s.sel.pid != s.open_pid() {
         return None;
     }
     let p = s.open_page()?;
@@ -392,10 +394,13 @@ fn box_at(s: &EditorState, r: Rect, off: (i32, i32)) -> Rect {
 /// What the selection's outline draws with its box at `off`: the box's dithered band (as the link lasso's)
 /// and its carried link areas' thinner ones, each (rect, band, halo) for canvas_dither_rect, screen px.
 fn outline_shapes(s: &EditorState, off: (i32, i32)) -> Vec<(Rect, i32, i32)> {
-    let mut v = Vec::with_capacity(1 + s.sel.links.len());
+    let mut v = Vec::with_capacity(1 + s.sel.links.len() + s.sel.zlinks.len());
     v.push((rect_inflate(box_at(s, s.sel.box_, off), ui_px(6.0)), link_band(), ui_px(1.0)));
     for l in s.sel.links.iter().filter(|l| l.has_area) {
         v.push((box_at(s, l.area, off), ui_px(2.0), ui_px(1.0)));
+    }
+    for z in &s.sel.zlinks {
+        v.push((box_at(s, z.area, off), ui_px(2.0), ui_px(1.0)));
     }
     v
 }
@@ -618,14 +623,27 @@ pub(super) fn sel_draw(a: &mut App, r: Rect) {
         layout_bar(a);
     }
     let clip = a.screen.clip;
-    let s = ed_ref(a);
-    if (st == SelState::Selected || st == SelState::Dragging) && s.sel.pid == s.open_pid() {
-        if let Some(off) = outline_off(&s.sel) {
-            let handles = handles_shown(s);
-            draw_outline(a, off, r);
-            if handles {
-                draw_resize_handles(a, off, r);
-            }
+    let (sel_zlinks, handles, off_opt) = {
+        let s = ed_ref(a);
+        if (st == SelState::Selected || st == SelState::Dragging) && s.sel.pid == s.open_pid() {
+            (s.sel.zlinks.clone(), handles_shown(s), outline_off(&s.sel))
+        } else {
+            (Vec::new(), false, None)
+        }
+    };
+    if let Some(off) = off_opt {
+        draw_outline(a, off, r);
+        if handles {
+            draw_resize_handles(a, off, r);
+        }
+        for z in sel_zlinks {
+            let moved_area = Rect {
+                x: z.area.x + off.0,
+                y: z.area.y + off.1,
+                w: z.area.w,
+                h: z.area.h,
+            };
+            crate::editor::zotero_single_card_draw(a, &z, Some(moved_area), r);
         }
     }
     canvas_set_clip(&mut a.screen, r);
@@ -787,6 +805,7 @@ pub(super) fn sel_deselect(a: &mut App) {
     s.sel.plan.clear();
     s.sel.kept.clear();
     s.sel.links.clear();
+    s.sel.zlinks.clear();
     s.sel.box_ = RECT_EMPTY;
     s.sel.drag = (0, 0);
     s.sel.dv = DragView::default(); // (a drag ended by Back, an undo...: its copy of the screen goes)
@@ -1558,6 +1577,7 @@ fn lasso_done(a: &mut App) {
     let pid = s.open_pid();
     let lasso = Lasso::new(&pts);
     let page_links: Vec<NavLink> = s.nav.links.iter().filter(|l| l.pid == pid).copied().collect();
+    let page_zlinks: Vec<crate::zotero_bridge::ZoteroRef> = crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).to_vec();
     let t0 = now_ms();
     let mut reused = false;
     let exact = s.sel.exact;
@@ -1572,7 +1592,7 @@ fn lasso_done(a: &mut App) {
                 }
                 None => lasso_enclosed(p, l, dpi),
             };
-            Some((judge(p, &page_links, l, on, exact, dpi), p.strokes.iter().any(|st| stroke_is_erase(st) && rect_overlaps(st.bbox, l.bounds))))
+            Some((judge(p, &page_links, &page_zlinks, l, on, exact, dpi), p.strokes.iter().any(|st| stroke_is_erase(st) && rect_overlaps(st.bbox, l.bounds))))
         }
         _ => None,
     };
@@ -1608,7 +1628,7 @@ fn lasso_done(a: &mut App) {
         }
         None => Vec::new(),
     };
-    sel_take(s, plan, &page_links, pts);
+    sel_take(s, plan, &page_links, &page_zlinks, pts);
     s.sel.visible_key.set(key);
     s.sel.visible.borrow_mut().extend(handed);
     qlog!("lasso: select n=%d cut=%d links=%d exact=%d ms=%u", n as i32, ncut as i32, s.sel.links.len() as i32, exact as i32, ms);
@@ -1624,13 +1644,15 @@ fn lasso_done(a: &mut App) {
 
 /// What lasso l selects on page p in a mode, given the whole-strokes enclosure `on`: in whole strokes, a
 /// plan with no cut (lasso_select's answer); in exact area, lasso_cut_plan's (timed and logged).
-fn judge(p: &Page, links: &[NavLink], l: &Lasso, on: Vec<bool>, exact: bool, dpi: f32) -> CutPlan {
+fn judge(p: &Page, links: &[NavLink], zlinks: &[crate::zotero_bridge::ZoteroRef], l: &Lasso, on: Vec<bool>, exact: bool, dpi: f32) -> CutPlan {
+    let z_sel = lasso_select_zlinks(zlinks, l);
     if !exact {
         let sel = lasso_select_from(p, links, l, on);
-        return CutPlan { whole: sel.strokes, cut: Vec::new(), links: sel.links };
+        return CutPlan { whole: sel.strokes, cut: Vec::new(), links: sel.links, zlinks: z_sel };
     }
     let t0 = now_ms();
-    let plan = lasso_cut_plan(p, links, l, dpi, on);
+    let mut plan = lasso_cut_plan(p, links, l, dpi, on);
+    plan.zlinks = z_sel;
     let pieces: usize = plan.cut.iter().map(|c| c.1.len()).sum();
     qlog!("lasso: exact cut=%d pieces=%d walk_ms=%u", plan.cut.len() as i32, pieces as i32, now_ms().wrapping_sub(t0));
     plan
@@ -1638,7 +1660,7 @@ fn judge(p: &Page, links: &[NavLink], l: &Lasso, on: Vec<bool>, exact: bool, dpi
 
 /// The selection becomes plan (made on the open page, whose links are `page_links`), its lasso `pts` kept
 /// for the mode button.
-fn sel_take(s: &mut EditorState, plan: CutPlan, page_links: &[NavLink], pts: Vec<(f32, f32)>) {
+fn sel_take(s: &mut EditorState, plan: CutPlan, page_links: &[NavLink], page_zlinks: &[crate::zotero_bridge::ZoteroRef], pts: Vec<(f32, f32)>) {
     let pid = s.open_pid();
     let p = s.open_page().unwrap();
     let ids: Vec<StrokeId> = plan.whole.iter().map(|&i| stroke_id(&p.strokes[i])).collect();
@@ -1660,12 +1682,17 @@ fn sel_take(s: &mut EditorState, plan: CutPlan, page_links: &[NavLink], pts: Vec
             b = rect_union(b, l.area);
         }
     }
+    let zlinks: Vec<crate::zotero_bridge::ZoteroRef> = plan.zlinks.iter().map(|&k| page_zlinks[k].clone()).collect();
+    for z in &zlinks {
+        b = rect_union(b, z.area);
+    }
     s.sel.state = SelState::Selected;
     s.sel.pid = pid;
     s.sel.ids = ids;
     s.sel.visible.borrow_mut().clear(); // (an exact-area piece freed since may share a new one's address)
     s.sel.plan = cut;
     s.sel.links = links;
+    s.sel.zlinks = zlinks;
     s.sel.kept = pts;
     s.sel.box_ = rect_intersect(b, Rect { x: 0, y: 0, w: s.pgw, h: s.pgh });
     s.sel.drag = (0, 0);
@@ -1684,14 +1711,15 @@ fn sel_mode_toggle(a: &mut App) {
         let pts = std::mem::take(&mut s.sel.kept);
         let pid = s.open_pid();
         let page_links: Vec<NavLink> = s.nav.links.iter().filter(|l| l.pid == pid).copied().collect();
+        let page_zlinks: Vec<crate::zotero_bridge::ZoteroRef> = crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).to_vec();
         let plan = match (Lasso::new(&pts), s.open_page()) {
-            (Some(l), Some(p)) => Some(judge(p, &page_links, &l, lasso_enclosed(p, &l, dpi), now, dpi)),
+            (Some(l), Some(p)) => Some(judge(p, &page_links, &page_zlinks, &l, lasso_enclosed(p, &l, dpi), now, dpi)),
             _ => None,
         };
         match plan.filter(|pl| !pl.is_empty()) {
             Some(plan) => {
                 let (n, ncut) = (plan.taken(), plan.cut.len());
-                sel_take(s, plan, &page_links, pts);
+                sel_take(s, plan, &page_links, &page_zlinks, pts);
                 qlog!("lasso: judged again n=%d cut=%d exact=%d", n as i32, ncut as i32, now as i32);
             }
             None => {
@@ -2350,6 +2378,25 @@ fn spot_box(b: Rect, spot: Spot) -> Rect {
     Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
+fn zotero_placed(z: &crate::zotero_bridge::ZoteroRef, spot: Spot, pid: u32, seed: u32, pw: i32, ph: i32) -> Option<crate::zotero_bridge::ZoteroRef> {
+    let mut out = z.clone();
+    out.pid = pid;
+    out.seed = seed;
+    let mx = |x: f32| x * spot.scale + spot.dx;
+    let my = |y: f32| y * spot.scale + spot.dy;
+    let a = z.area;
+    let x0 = (mx(a.x as f32).floor() as i32).clamp(0, pw);
+    let y0 = (my(a.y as f32).floor() as i32).clamp(0, ph);
+    let x1 = (mx((a.x + a.w) as f32).ceil() as i32).clamp(0, pw);
+    let y1 = (my((a.y + a.h) as f32).ceil() as i32).clamp(0, ph);
+    let w = (x1 - x0).max(z.area.w.min(pw));
+    let h = (y1 - y0).max(z.area.h.min(ph));
+    let x0 = x0.min(pw - w).max(0);
+    let y0 = y0.min(ph - h).max(0);
+    out.area = Rect { x: x0, y: y0, w, h };
+    Some(out)
+}
+
 /// The selection put by spot: moved (a drag released) or scaled (a resize released), one undo step: the ink
 /// off its place, the group at the end of the page with its erasing, carried link areas moved or scaled.
 fn sel_place(a: &mut App, spot: Spot) {
@@ -2366,6 +2413,7 @@ fn sel_place(a: &mut App, spot: Spot) {
     let pid = s.open_pid();
     let t0 = now_ms();
     let carried = s.sel.links.clone();
+    let carried_z = s.sel.zlinks.clone();
     // the links first: if they cannot be saved, nothing changes
     let mut records: Vec<(Option<LinkRec>, Option<LinkRec>)> = Vec::new();
     let mut moved_links: Vec<NavLink> = Vec::new();
@@ -2389,12 +2437,32 @@ fn sel_place(a: &mut App, spot: Spot) {
             return;
         }
     }
+    let mut zrecords: Vec<(Option<crate::zotero_bridge::ZoteroRef>, Option<crate::zotero_bridge::ZoteroRef>)> = Vec::new();
+    let mut moved_zlinks: Vec<crate::zotero_bridge::ZoteroRef> = Vec::new();
+    for z in &carried_z {
+        if let Some(m) = zotero_placed(z, spot, pid, z.seed, s.pgw, s.pgh) {
+            zrecords.push((Some(z.clone()), Some(m.clone())));
+            moved_zlinks.push(m);
+        }
+    }
+    if !zrecords.is_empty() {
+        for (b, af) in &zrecords {
+            if let Some(b) = b {
+                s.zl.links.links.retain(|l| l.seed != b.seed);
+            }
+            if let Some(af) = af {
+                s.zl.links.push(af.clone());
+            }
+        }
+        s.zl.dirty = true;
+        crate::editor::zotero_save(a);
+    }
     let s = ed(a);
     step_begin(s, true);
     let sp = splice_plan(s, ip, &idx);
     let idx: Vec<usize> = sp.as_ref().map_or(idx, |sp| sp.sel.clone());
     let page = s.hist[ip].page.as_deref().unwrap();
-    let g = lasso_lift(page, &idx, carried.clone(), dpi);
+    let g = lasso_lift_with_zlinks(page, &idx, carried.clone(), carried_z.clone(), dpi);
     let src_seeds = staying_link_seeds(s, pid, &carried);
     // take the selection off
     let page = s.hist[ip].page.as_deref_mut().unwrap();
@@ -2439,15 +2507,35 @@ fn sel_place(a: &mut App, spot: Spot) {
                 }
                 save_links(s);
             }
+            let mut zotero_rollback = false;
+            if !zrecords.is_empty() {
+                for (b, af) in &zrecords {
+                    if let Some(af) = af {
+                        s.zl.links.links.retain(|l| l.seed != af.seed);
+                    }
+                    if let Some(b) = b {
+                        s.zl.links.push(b.clone());
+                    }
+                }
+                s.zl.dirty = true;
+                zotero_rollback = true;
+            }
             s.sel.drag = (0, 0);
             draw_page(a, rect_union(dirty, e.drawn));
             step_end(ed(a), RECT_EMPTY);
+            if zotero_rollback {
+                crate::editor::zotero_save(a);
+            }
             app_toast(a, tr(TOO_MANY_LAYERS), 3000);
             return;
         }
     };
     let dst_ms = now_ms().wrapping_sub(t1);
     dirty = rect_union(dirty, placed.drawn);
+    for (b, af) in &zrecords {
+        if let Some(b) = b { dirty = rect_union(dirty, b.area); }
+        if let Some(af) = af { dirty = rect_union(dirty, af.area); }
+    }
     let want = placed.strokes.len();
     let n_added = add_placed(s, ip, placed.strokes);
     if n_added < want {
@@ -2455,17 +2543,18 @@ fn sel_place(a: &mut App, spot: Spot) {
     }
     let s = ed(a);
     let link = (!records.is_empty()).then(|| LinkEdit { pid, records });
+    let zlink = (!zrecords.is_empty()).then(|| crate::history::ZoteroEdit { pid, records: zrecords });
     let (hh, page) = hist_page(&mut s.hist, ih, ip);
     match sp {
         Some(sp) => {
             let (ix, gone, mut added_at) = spliced_history(sp, &idx, removed);
             let n = page.strokes.len();
             added_at.extend(n - n_added..n);
-            history_push_lasso_at(hh, page, &ix, gone, &added_at, link);
+            history_push_lasso_at_with_zlinks(hh, page, &ix, gone, &added_at, link, zlink);
         }
         None => {
             let idx32: Vec<i32> = idx.iter().map(|&i| i as i32).collect();
-            history_push_lasso(hh, page, &idx32, removed, n_added, link);
+            history_push_lasso_with_zlinks(hh, page, &idx32, removed, n_added, link, zlink);
         }
     }
     s.sel.kept.clear();
@@ -2478,8 +2567,22 @@ fn sel_place(a: &mut App, spot: Spot) {
     let n = page.strokes.len();
     s.sel.ids = page.strokes[n - n_added..].iter().filter(|st| stroke_is_ink(st)).map(|st| stroke_id(st)).collect();
     s.sel.links = moved_links;
-    let b = spot_box(s.sel.box_, spot);
-    s.sel.box_ = Rect { x: b.x.clamp(0, (s.pgw - b.w).max(0)), y: b.y.clamp(0, (s.pgh - b.h).max(0)), w: b.w, h: b.h };
+    s.sel.zlinks = moved_zlinks;
+    if s.sel.ids.is_empty() {
+        let mut b = RECT_EMPTY;
+        for z in &s.sel.zlinks {
+            b = rect_union(b, z.area);
+        }
+        for l in &s.sel.links {
+            if l.has_area {
+                b = rect_union(b, l.area);
+            }
+        }
+        s.sel.box_ = Rect { x: b.x.clamp(0, (s.pgw - b.w).max(0)), y: b.y.clamp(0, (s.pgh - b.h).max(0)), w: b.w, h: b.h };
+    } else {
+        let b = spot_box(s.sel.box_, spot);
+        s.sel.box_ = Rect { x: b.x.clamp(0, (s.pgw - b.w).max(0)), y: b.y.clamp(0, (s.pgh - b.h).max(0)), w: b.w, h: b.h };
+    }
     s.sel.drag = (0, 0);
     s.boxes.stale = true;
     qlog!("lasso: place n=%d carried=%d scoped=%d scale=%d src_ms=%u dst_ms=%u", g.ink as i32, g.carried as i32, placed.scoped as i32, (spot.scale * 1000.0) as i32, src_ms, dst_ms);
@@ -2539,7 +2642,7 @@ fn sel_copy(a: &mut App, cut: bool) -> bool {
     let page = s.open_page().unwrap();
     // erased content does not travel: ink entirely erased is left out
     let visible: Vec<usize> = idx.iter().copied().filter(|&i| stroke_visible(page, i, dpi)).collect();
-    let mut g = lasso_lift(page, &visible, s.sel.links.clone(), dpi);
+    let mut g = lasso_lift_with_zlinks(page, &visible, s.sel.links.clone(), s.sel.zlinks.clone(), dpi);
     if let (Some(sp), Some(ip)) = (sp, ip) {
         #[cfg(debug_assertions)]
         let n_before = s.hist[ip].page.as_deref().map_or(0, |p| p.strokes.len()) - sp.outside.len() - sp.sel.len() + sp.originals.len() + sp.whole.len();
@@ -2579,6 +2682,7 @@ fn sel_delete(a: &mut App, cut: bool) -> bool {
     };
     let pid = s.open_pid();
     let carried = s.sel.links.clone();
+    let carried_z = s.sel.zlinks.clone();
     let records: Vec<(Option<LinkRec>, Option<LinkRec>)> = carried.iter().map(|l| (Some(link_rec(l)), None)).collect();
     if !records.is_empty() {
         if !s.nav.links_writable {
@@ -2596,6 +2700,15 @@ fn sel_delete(a: &mut App, cut: bool) -> bool {
             }
             return false;
         }
+    }
+    let mut zrecords: Vec<(Option<crate::zotero_bridge::ZoteroRef>, Option<crate::zotero_bridge::ZoteroRef>)> = Vec::new();
+    if !carried_z.is_empty() {
+        for z in &carried_z {
+            s.zl.links.links.retain(|l| l.seed != z.seed);
+            zrecords.push((Some(z.clone()), None));
+        }
+        s.zl.dirty = true;
+        crate::editor::zotero_save(a);
     }
     let s = ed(a);
     step_begin(s, true);
@@ -2616,17 +2729,21 @@ fn sel_delete(a: &mut App, cut: bool) -> bool {
         page_render_tiles(&mut s.page_canvas, page, r, &m, dpi);
         dirty = r;
     }
+    for z in &carried_z {
+        dirty = rect_union(dirty, z.area);
+    }
     let n = removed.len();
     let link = (!records.is_empty()).then(|| LinkEdit { pid, records });
+    let zlink = (!zrecords.is_empty()).then(|| crate::history::ZoteroEdit { pid, records: zrecords });
     let (hh, page) = hist_page(&mut s.hist, ih, ip);
     match sp {
         Some(sp) => {
             let (ix, gone, added_at) = spliced_history(sp, &idx, removed);
-            history_push_lasso_at(hh, page, &ix, gone, &added_at, link);
+            history_push_lasso_at_with_zlinks(hh, page, &ix, gone, &added_at, link, zlink);
         }
         None => {
             let idx32: Vec<i32> = idx.iter().map(|&i| i as i32).collect();
-            history_push_lasso(hh, page, &idx32, removed, 0, link);
+            history_push_lasso_with_zlinks(hh, page, &idx32, removed, 0, link, zlink);
         }
     }
     step_end(s, dirty);
@@ -2637,6 +2754,7 @@ fn sel_delete(a: &mut App, cut: bool) -> bool {
     s.sel.plan.clear();
     s.sel.kept.clear();
     s.sel.links.clear();
+    s.sel.zlinks.clear();
     s.sel.box_ = RECT_EMPTY;
     s.boxes.stale = true;
     qlog!("lasso: %s n=%d", if cut { "cut" } else { "delete" }, n as i32);
@@ -2811,6 +2929,25 @@ pub(super) fn sel_paste(a: &mut App, at: Option<(i32, i32)>) {
             return;
         }
     }
+    let mut new_zlinks: Vec<crate::zotero_bridge::ZoteroRef> = Vec::new();
+    let mut zrecords: Vec<(Option<crate::zotero_bridge::ZoteroRef>, Option<crate::zotero_bridge::ZoteroRef>)> = Vec::new();
+    for z in &g.zlinks {
+        let mut seed = crate::zotero_bridge::zotero_seed(pid, &z.item_key);
+        while s.zl.links.links.iter().any(|existing| existing.seed == seed) || new_zlinks.iter().any(|existing| existing.seed == seed) {
+            seed = (seed.wrapping_add(1)) | 0x8000_0000;
+        }
+        if let Some(m) = zotero_placed(z, spot, pid, seed, s.pgw, s.pgh) {
+            new_zlinks.push(m);
+        }
+    }
+    if !new_zlinks.is_empty() {
+        for m in &new_zlinks {
+            s.zl.links.push(m.clone());
+            zrecords.push((None, Some(m.clone())));
+        }
+        s.zl.dirty = true;
+        crate::editor::zotero_save(a);
+    }
     let s = ed(a);
     step_begin(s, true);
     let t0 = now_ms();
@@ -2825,6 +2962,13 @@ pub(super) fn sel_paste(a: &mut App, at: Option<(i32, i32)>) {
             if !new_links.is_empty() {
                 save_links(s);
             }
+            if !new_zlinks.is_empty() {
+                for m in &new_zlinks {
+                    s.zl.links.links.retain(|l| l.seed != m.seed);
+                }
+                s.zl.dirty = true;
+                crate::editor::zotero_save(a);
+            }
             // (the group's ink drawn before the refusal is not on the page: drawn again from it)
             draw_page(a, e.drawn);
             step_end(ed(a), RECT_EMPTY);
@@ -2833,7 +2977,10 @@ pub(super) fn sel_paste(a: &mut App, at: Option<(i32, i32)>) {
         }
     };
     let ms = now_ms().wrapping_sub(t0);
-    let dirty = placed.drawn;
+    let mut dirty = placed.drawn;
+    for m in &new_zlinks {
+        dirty = rect_union(dirty, m.area);
+    }
     let want = placed.strokes.len();
     let n_added = add_placed(s, ip, placed.strokes);
     if n_added < want {
@@ -2842,8 +2989,9 @@ pub(super) fn sel_paste(a: &mut App, at: Option<(i32, i32)>) {
     let s = ed(a);
     let records: Vec<(Option<LinkRec>, Option<LinkRec>)> = new_links.iter().map(|m| (None, Some(link_rec(m)))).collect();
     let link = (!records.is_empty()).then(|| LinkEdit { pid, records });
+    let zlink = (!zrecords.is_empty()).then(|| crate::history::ZoteroEdit { pid, records: zrecords });
     let (hh, page) = hist_page(&mut s.hist, ih, ip);
-    history_push_lasso(hh, page, &[], Vec::new(), n_added, link);
+    history_push_lasso_with_zlinks(hh, page, &[], Vec::new(), n_added, link, zlink);
     step_end(s, dirty);
     // the paste lands selected, ready to drag
     let page = s.hist[ip].page.as_deref().unwrap();
@@ -2859,7 +3007,21 @@ pub(super) fn sel_paste(a: &mut App, at: Option<(i32, i32)>) {
     s.sel.plan.clear(); // (a pasted group is whole strokes: no cut plan, no lasso to judge again)
     s.sel.kept.clear();
     s.sel.links = new_links;
-    s.sel.box_ = rect_intersect(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, Rect { x: 0, y: 0, w: s.pgw, h: s.pgh });
+    s.sel.zlinks = new_zlinks;
+    if s.sel.ids.is_empty() && !s.sel.zlinks.is_empty() {
+        let mut b = RECT_EMPTY;
+        for z in &s.sel.zlinks {
+            b = rect_union(b, z.area);
+        }
+        for l in &s.sel.links {
+            if l.has_area {
+                b = rect_union(b, l.area);
+            }
+        }
+        s.sel.box_ = rect_intersect(b, Rect { x: 0, y: 0, w: s.pgw, h: s.pgh });
+    } else {
+        s.sel.box_ = rect_intersect(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, Rect { x: 0, y: 0, w: s.pgw, h: s.pgh });
+    }
     s.sel.drag = (0, 0);
     s.boxes.stale = true;
     if g.carried > 0 {
@@ -2867,7 +3029,7 @@ pub(super) fn sel_paste(a: &mut App, at: Option<(i32, i32)>) {
     }
     qlog!("lasso: paste n=%d carried=%d scoped=%d src_ms=0 dst_ms=%u", g.ink as i32, g.carried as i32, placed.scoped as i32, ms);
     s.last_lasso_ms = (0, ms);
-    if s.sel.ids.is_empty() {
+    if s.sel.ids.is_empty() && s.sel.zlinks.is_empty() {
         s.sel.state = SelState::Armed;
     }
     s.sel.quiet = false; // (a Select mode a finger's hold entered shows now: its bar, and the panel's lasso)
@@ -2911,6 +3073,7 @@ pub(super) fn sel_probe(a: &App, key: &str) -> Option<String> {
         }
         "page_sig_same" => ((PAGE_SIG.with(|c| c.get()) == page_sig(s)) as i32).to_string(),
         "sel_links" => s.sel.links.len().to_string(),
+        "sel_zlinks" => s.sel.zlinks.len().to_string(),
         "sel_box" => {
             let b = s.sel.box_;
             format!("{} {} {} {}", b.x, b.y, b.w, b.h)
