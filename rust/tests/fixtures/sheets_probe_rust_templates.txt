@@ -1,6 +1,7 @@
 # The Templates and Photos sheets end with a From a file... tile in Rust (2.2, #146), and the Templates sheet also
-# ends with From a notebook... (2.2, #195): the empty sheets and the page that holds the tiles. Only these raster
-# hashes differ; the layouts, page counts and every result keep the C baseline.
+# ends with From a notebook... (2.2, #195): the empty sheets and the filled page's tiles. Rust's grid is the paper
+# picker's 18 a page, so the filled page's waiting tiles, their dirty region and the page after a turn are Rust's
+# own. Only these reviewed pixels differ; the page counts and every result keep the C baseline.
 # The tiles' labels are drawn in each language, so a language's empty-sheet lines follow its "From a file...": when
 # that translation changes, look at the 16 sheets again and record their lines (the ja lines were, when #136
 # translated it; the empty sheets were recorded again for #195's tiles and 18-a-page grid).
@@ -68,7 +69,11 @@ tplsheet empty1 pl lg templates bf7d09d080465c5c
 tplsheet empty1 pl lg photos 689f033c3b09c580
 tplsheet empty1 pl lc templates 149ade3c4f0bad73
 tplsheet empty1 pl lc photos 6eed308367ba400e
-tplsheet pg turn 1 -> 1 page 2 7d02ff8031d4fcca
-tplsheet pc turn 1 -> 1 page 2 99db4c77f84e3f5d
+tplsheet pg waiting page 1 of 2 selected 16 hash 97fd54e1ec6959cf
+tplsheet pg ready tick 1 dirty 70 60 1720 2300 page 1 of 2 hash 0f54d917c5250020
+tplsheet pg turn 1 -> 1 page 2 65b07b6920094b66
+tplsheet pc waiting page 1 of 2 selected 16 hash 9954fe5e298d0577
+tplsheet pc ready tick 0 dirty 0 0 0 0 page 1 of 2 hash 9954fe5e298d0577
+tplsheet pc turn 1 -> 1 page 2 283e422a001ff212
 tplsheet lg turn 1 -> 1 page 2 3a38c1575e568e53
 tplsheet lc turn 1 -> 1 page 2 4a7df40c17332e1a
