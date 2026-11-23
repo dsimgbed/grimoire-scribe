@@ -180,9 +180,11 @@ fn sheet_and_badges(root: &PathBuf, bridge: &str, store: &str, nb: &NotebookInfo
     check!(probe(&mut a, "zotero.badge.1.item") == "ABCD1234");
     check!(probe(&mut a, "zotero.sheet") == "0");
 
-    // Cite a pending event from the Inbox: it becomes a link and leaves the inbox. The bar is still up
-    // under the sheet, so its Zotero button opens the picker again.
+    // Cite a pending event from the Inbox: it becomes a link and leaves the inbox.
+    check!(probe(&mut a, "bar") == "0");
+    assert!(editor_shortcut(&mut a, SHORTCUT_LINKS));
     check!(tap(&mut a, "bar.zotero", 1550));
+    check!(probe(&mut a, "bar") == "0");
     check!(tap(&mut a, "zotero.inbox", 1600));
     check!(probe(&mut a, "zotero.sheet.tab") == "inbox");
     check!(probe(&mut a, "zotero.sheet.rows") == "2");
@@ -194,6 +196,7 @@ fn sheet_and_badges(root: &PathBuf, bridge: &str, store: &str, nb: &NotebookInfo
     check!(probe(&mut a, "zotero.badge.1.locator") == "p. 42");
 
     // Discard the other pending event: its file and memory copy both go.
+    assert!(editor_shortcut(&mut a, SHORTCUT_LINKS));
     check!(tap(&mut a, "bar.zotero", 1900));
     check!(tap(&mut a, "zotero.row.1", 2000));
     check!(tap(&mut a, "zotero.discard", 2100));
@@ -207,8 +210,7 @@ fn sheet_and_badges(root: &PathBuf, bridge: &str, store: &str, nb: &NotebookInfo
     check!(text.contains("ABCD1234") && text.contains("EFGH5678"));
     check!(text.contains(&format!("zref.{}=", nb.page_ids[0])));
 
-    // Close the picker and the Links bar so the badge on the page can be tapped.
-    assert!(editor_shortcut(&mut a, SHORTCUT_BACK));
+    // Close the picker so the badge on the page can be tapped (the Links bar is already closed).
     assert!(editor_shortcut(&mut a, SHORTCUT_BACK));
     check!(probe(&mut a, "zotero.sheet") == "0");
     check!(probe(&mut a, "bar") == "0");

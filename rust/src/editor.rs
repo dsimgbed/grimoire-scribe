@@ -3301,12 +3301,7 @@ fn draw_menus(a: &mut App, r: Rect) {
     if s.find.open {
         with_find(a, |f, a, nb, nav| findsheet_draw(f, a, nb, nav, r));
     }
-    // The Zotero picker, over the page but under the Links bar.
-    let s = ed_ref(a);
-    if s.zsheet.open {
-        with_modal(a, |s| &mut s.zsheet, |z, a| { zotero_sheet_draw(z, a, r); });
-    }
-    // The Links bar, over everything (laid out again as it is drawn: a turn changes the screen it is on).
+    // The Links bar, over the page (laid out again as it is drawn: a turn changes the screen it is on).
     let s = ed_ref(a);
     if s.lb.open {
         let (aw, ah) = (a.w, a.h);
@@ -3321,6 +3316,11 @@ fn draw_menus(a: &mut App, r: Rect) {
             with_lb(a, |lb, a, nb, nav| linkbar_draw(lb, a, nb, nav, peek));
         }
         a.toast_floor = rect.y;
+    }
+    // The Zotero picker, over the page and any Links bar (matches pointer dispatch priority).
+    let s = ed_ref(a);
+    if s.zsheet.open {
+        with_modal(a, |s| &mut s.zsheet, |z, a| { zotero_sheet_draw(z, a, r); });
     }
     // The link-making strip, where the bar draws (the bar is never up with it).
     let st = ed_ref(a).lm.state;
@@ -9600,7 +9600,13 @@ fn bar_result(a: &mut App, r: LbResult, d: Rect) {
             app_invalidate(a, g, RefreshMode::Ui);
         }
         LbResult::Docs | LbResult::DocsBack => bar_relayout(a),
-        LbResult::Zotero => zotero_show(a),
+        LbResult::Zotero => {
+            if ed_ref(a).peek.active {
+                bar_commit(a);
+            }
+            bar_drop(ed(a));
+            zotero_show(a);
+        }
         _ => {}
     }
 }

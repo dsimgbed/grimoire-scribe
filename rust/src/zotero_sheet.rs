@@ -164,6 +164,10 @@ pub fn zotero_sheet_close(z: &mut ZoteroSheet) {
     z.has_pressed = false;
 }
 
+fn rows_top(z: &ZoteroSheet, card_y: i32) -> i32 {
+    card_y + if z.tab == ZoteroTab::Library { u(294.0) } else { u(244.0) }
+}
+
 /// The sheet's card on an `aw x ah` screen: centred, with at least 40 logical px around it.
 pub fn zotero_sheet_layout(z: &mut ZoteroSheet, aw: i32, ah: i32) {
     z.aw = aw;
@@ -183,7 +187,7 @@ pub fn zotero_sheet_layout(z: &mut ZoteroSheet, aw: i32, ah: i32) {
     let tw = (inn.w - u(16.0)) / 2;
     hits_add(&mut z.hits, Rect { x: inn.x, y: ty, w: tw, h: u(96.0) }, ZS_INBOX, 0);
     hits_add(&mut z.hits, Rect { x: inn.x + tw + u(16.0), y: ty, w: tw, h: u(96.0) }, ZS_LIBRARY, 0);
-    let ry = z.rect.y + u(250.0);
+    let ry = rows_top(z, z.rect.y);
     let rh = u(112.0);
     let rg = u(14.0);
     for i in 0..z.rows.len().min(ZS_ROWS) {
@@ -275,9 +279,9 @@ pub fn zotero_sheet_draw(z: &mut ZoteroSheet, a: &mut App, r: Rect) -> Rect {
     hits_add(&mut z.hits, Rect { x: inn.x, y: ty, w: tw, h: u(96.0) }, ZS_INBOX, 0);
     hits_add(&mut z.hits, Rect { x: inn.x + tw + u(16.0), y: ty, w: tw, h: u(96.0) }, ZS_LIBRARY, 0);
     if z.tab == ZoteroTab::Library {
-        font_draw_left_name(c, FontFace::Regular, ui_small_size(), Rect { x: inn.x, y: card.y + u(230.0), w: inn.w, h: u(56.0) }, &format!("Search: {}", z.filter), 150);
+        font_draw_left_name(c, FontFace::Regular, ui_small_size(), Rect { x: inn.x, y: card.y + u(232.0), w: inn.w, h: u(52.0) }, &format!("Search: {}", z.filter), 150);
     }
-    let ry0 = card.y + u(250.0);
+    let ry0 = rows_top(z, card.y);
     let rh = u(112.0);
     let rg = u(14.0);
     if z.rows.is_empty() {
