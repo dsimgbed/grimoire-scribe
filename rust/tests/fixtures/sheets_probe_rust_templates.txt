@@ -75,5 +75,9 @@ tplsheet pg turn 1 -> 1 page 2 65b07b6920094b66
 tplsheet pc waiting page 1 of 2 selected 16 hash 9954fe5e298d0577
 tplsheet pc ready tick 0 dirty 0 0 0 0 page 1 of 2 hash 9954fe5e298d0577
 tplsheet pc turn 1 -> 1 page 2 283e422a001ff212
-tplsheet lg turn 1 -> 1 page 2 3a38c1575e568e53
-tplsheet lc turn 1 -> 1 page 2 4a7df40c17332e1a
+tplsheet lg waiting page 1 of 2 selected 16 hash 81f602981bc79ca5
+tplsheet lg ready tick 0 dirty 0 0 0 0 page 1 of 2 hash 81f602981bc79ca5
+tplsheet lg turn 1 -> 1 page 2 7bdd98657925a8c6
+tplsheet lc waiting page 1 of 2 selected 16 hash 0ae783903335f648
+tplsheet lc ready tick 0 dirty 0 0 0 0 page 1 of 2 hash 0ae783903335f648
+tplsheet lc turn 1 -> 1 page 2 8477c716893460f7
