@@ -995,7 +995,7 @@ fn app_shortcut_action(a: &mut App, action: i32, src: ActionSrc) -> bool {
         return true;
     }
     if action == SHORTCUT_STATUS_CORNER {
-        status_toggle(a);
+        status_corner_shortcut(a);
         return true;
     }
     if a.scr == ScreenId::Penset {

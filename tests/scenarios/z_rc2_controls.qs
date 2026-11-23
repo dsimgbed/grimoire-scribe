@@ -10,7 +10,7 @@ expect settings.status_on is 1
 expect settings.status_mode is 1
 expect settings.status_size is 0
 expect settings.status_corner is 0
-expect status.reserved is 88
+expect status.reserved is 0
 tap panel shapes
 expect editor.shapes_menu is 1
 expect settings.shapes is 1
