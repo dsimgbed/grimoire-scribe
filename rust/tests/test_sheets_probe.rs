@@ -1187,12 +1187,16 @@ fn recorded(name: &str) -> String {
             out.push('\n');
         }
     }
-    // Only reviewed raster hashes differ (the Index screens, and the Templates and Photos sheets' From a file... tile of
-    // 2.2, #146); layouts and event results still use the C baseline.
+    // Only reviewed pixels differ (the Index screens, and the Templates and Photos sheets' tiles of 2.2, #146 and
+    // #195); layouts and event results still use the C baseline. A tplsheet ready line's dirty region is the tiles'
+    // own, so an override for one matches on the line up to "dirty" and records both.
     let overrides=concat!(include_str!("fixtures/sheets_probe_rust_index.txt"),include_str!("fixtures/sheets_probe_rust_templates.txt"));
-    out.lines().map(|line|{
+    fn key(line: &str) -> &str {
         let (key,_)=line.rsplit_once(' ').unwrap_or((line,""));
-        overrides.lines().find(|entry|entry.rsplit_once(' ').is_some_and(|(label,_)|label==key)).unwrap_or(line).to_string()+"\n"
+        if key.starts_with("tplsheet ") {key.split_once(" dirty ").map_or(key,|(head,_)|head)} else {key}
+    }
+    out.lines().map(|line|{
+        overrides.lines().find(|entry|key(entry)==key(line)).unwrap_or(line).to_string()+"\n"
     }).collect()
 }
 
