@@ -121,6 +121,8 @@ pub struct MapView {
     foreign: Vec<ForeignPlace>,
     /// the backlinks generation the anchors were made at
     anchors_gen: u32,
+    /// the zoterolinks.ini generation the Zotero anchors were made at
+    zotero_gen: u32,
     link_count: usize,
     page_totals: Option<(usize,usize)>,
     canvas: Canvas,
@@ -898,6 +900,7 @@ fn layout_all(v: &mut MapView, a: &mut App) -> bool {
 fn anchors_build(v: &mut MapView, nb: &NotebookInfo) {
     v.foreign.clear();
     v.anchors_gen = backlinks_generation();
+    v.zotero_gen = crate::zotero_bridge::zoterolinks_generation(nb.id.as_str());
     let mut books: Vec<(FixedStr<STORE_ID_LEN>, Option<std::rc::Rc<BlBook>>)> = Vec::new();
     fn book(books: &mut Vec<(FixedStr<STORE_ID_LEN>, Option<std::rc::Rc<BlBook>>)>, id: &str) -> Option<std::rc::Rc<BlBook>> {
         if let Some((_, b)) = books.iter().find(|(k, _)| *k == id) {
@@ -959,19 +962,67 @@ fn anchors_build(v: &mut MapView, nb: &NotebookInfo) {
             add(v, &mut books, &t, here, false, (0, 0));
         }
     }
+    // Zotero references are their own group in the foreign column: one box per cited item, with a
+    // line to every page that cites it. They are never layout nodes and never break a link.
+    zotero_anchors_build(v, nb);
     // Grouped by notebook (their ids' order, as the List groups them), pages in their order there, the
     // broken ones last in each group.
     v.foreign.sort_by(|a, b| (a.key, a.broken, a.number, a.target).cmp(&(b.key, b.broken, b.number, b.target)));
 }
 
+/// The Zotero group of the foreign column. zoterolinks.ini is a paper's own sidecar, so it is read
+/// here only; an absent file adds no anchors, no lines and no pixel of layout change.
+fn zotero_anchors_build(v: &mut MapView, nb: &NotebookInfo) {
+    let links = crate::zotero_bridge::zoterolinks_load(nb.id.as_str());
+    if links.links.is_empty() {
+        return;
+    }
+    for node in crate::zotero_bridge::zotero_references(&links) {
+        let Some(first) = links.links.iter().find(|l| l.item_key == node.item_key) else { continue };
+        let Some(target) = crate::zotero_bridge::zotero_target(first) else { continue };
+        if v.foreign.iter().any(|f| f.target.as_str() == target) || v.foreign.try_reserve(1).is_err() {
+            continue;
+        }
+        let mut here = Vec::new();
+        let mut here_out = Vec::new();
+        for &pid in &node.pages {
+            if nb.page_ids.contains(&pid) {
+                here.push(pid);
+                here_out.push(true);
+            }
+        }
+        if here.is_empty() {
+            continue;
+        }
+        let label = if node.short_cite.is_empty() { node.item_key.clone() } else { node.short_cite.clone() };
+        v.foreign.push(ForeignPlace {
+            target: FixedStr::from_str(&target),
+            key: FixedStr::from_str(crate::zotero_bridge::ZOTERO_NOTEBOOK_KEY),
+            notebook: tr("Zotero").to_string(),
+            label,
+            number: 0,
+            out: true,
+            inc: false,
+            broken: false,
+            here,
+            here_out,
+            first: (0, 0),
+        });
+    }
+}
+
 /// The backlinks cache learned more since the map opened (its idle check): the anchors made again and the
 /// map drawn again. No dot moves. True when it changed.
 pub fn mapview_anchors_refresh(v: &mut MapView, nb: &NotebookInfo, _nav: &Nav) -> bool {
-    if !v.open || v.scope == MapScope::All || v.anchors_gen == backlinks_generation() {
+    let shown = v.other.as_ref().map_or_else(|| nb.clone(), |o| o.0.clone());
+    let zotero_gen = crate::zotero_bridge::zoterolinks_generation(shown.id.as_str());
+    if !v.open
+        || v.scope == MapScope::All
+        || (v.anchors_gen == backlinks_generation() && v.zotero_gen == zotero_gen)
+    {
         return false;
     }
     let before: Vec<(FixedStr<NAV_TARGET_LEN>, bool, bool)> = v.foreign.iter().map(|f| (f.target, f.out, f.inc)).collect();
-    let shown = v.other.as_ref().map_or_else(|| nb.clone(), |o| o.0.clone());
     anchors_build(v, &shown);
     let changed = before != v.foreign.iter().map(|f| (f.target, f.out, f.inc)).collect::<Vec<_>>();
     if changed {

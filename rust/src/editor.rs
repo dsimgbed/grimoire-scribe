@@ -144,14 +144,16 @@ pub(crate) enum Owner {
     Widgets = 23,
     /// a contact that began on a widget frame (its title, close, minimize, grip or body)
     Widget = 24,
+    /// a contact that began on the Zotero sheet or a Zotero citation badge
+    Zotero = 25,
 }
 
 /// The owner's name in grimoire.log and the `editor.owner` probe.
 fn owner_name(o: Owner) -> &'static str {
-    const K: [&str; 25] = [
+    const K: [&str; 26] = [
         "none", "draw", "erase", "panel", "modal", "display", "pages", "tools", "build", "templates", "link", "bar",
         "outside", "find", "lasso", "card", "linkto", "strip", "map", "pen-drag", "select", "add-pad", "quick-size",
-        "widgets", "widget",
+        "widgets", "widget", "zotero",
     ];
     K[o as usize]
 }
@@ -572,6 +574,10 @@ pub struct EditorState {
     lb: LinkBar,
     /// the Find sheet (findsheet.rs), over the page while it is open
     find: FindSheet,
+    /// the Zotero reference picker and citation inbox, over the page while it is open
+    zsheet: ZoteroSheet,
+    /// this notebook's Zotero citation badges (zoterolinks.ini)
+    zl: ZoteroLinksState,
     /// Link to... (linkbar.rs in pick mode): where a new link goes, while its area waits (lm Pick)
     lt: LinkBar,
     /// the long-press card (linkcard.rs): a link held on the page, or a row held on the bar
@@ -876,6 +882,306 @@ fn with_modal<T: Default, R>(
     let r = f(&mut m, a);
     *field(ed(a)) = m;
     r
+}
+
+/// The editor's copy of zoterolinks.ini. It is kept in editor state (like `wl`) and only ever
+/// written under the notebook's own folder; a notebook without a bridge sidecar gets no file.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ZoteroLinksState {
+    /// the parsed sidecar, including lines this version carries forward
+    pub links: crate::zotero_bridge::ZoteroLinks,
+    /// the text last loaded or saved, so an unchanged sidecar is left alone
+    pub raw: String,
+    /// a ref was added or removed since the last save
+    pub dirty: bool,
+}
+
+impl ZoteroLinksState {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+
+type Zref = crate::zotero_bridge::ZoteroRef;
+
+/// Load (and prune) this notebook's Zotero badges. Called when a notebook opens; with no bridge
+/// directory nothing is read and the editor's copy stays empty.
+fn zotero_load(s: &mut EditorState) {
+    if !bridge_exists() {
+        s.zl.clear();
+        return;
+    }
+    let mut links = crate::zotero_bridge::zoterolinks_load(s.nb.id.as_str());
+    crate::zotero_bridge::zoterolinks_prune(&mut links, &s.nb);
+    let text = crate::zotero_bridge::zoterolinks_text(&links, Some(&s.nb));
+    s.zl.links = links;
+    s.zl.raw = String::from_utf8_lossy(&text).into_owned();
+    s.zl.dirty = false;
+}
+
+/// Write a changed zoterolinks.ini. A failed write keeps the dirty flag for the next close or handoff.
+fn zotero_save(a: &mut App) -> i32 {
+    if !bridge_exists() {
+        return 0;
+    }
+    let s = ed(a);
+    if !s.open || !s.zl.dirty || s.nb.id.is_empty() {
+        return 0;
+    }
+    let id = s.nb.id.to_string();
+    let nb = s.nb.clone();
+    let mut links = std::mem::take(&mut s.zl.links);
+    if crate::zotero_bridge::zoterolinks_prune(&mut links, &nb) > 0 {
+        s.zl.dirty = true;
+    }
+    let rc = crate::zotero_bridge::zoterolinks_save(id.as_str(), &mut links, &nb);
+    let s = ed(a);
+    s.zl.links = links;
+    if rc == 0 {
+        let text = crate::zotero_bridge::zoterolinks_text(&s.zl.links, Some(&s.nb));
+        s.zl.raw = String::from_utf8_lossy(&text).into_owned();
+        s.zl.dirty = false;
+    }
+    rc
+}
+
+/// The badge area for the `ordinal`th citation on a page, in page pixels. Citations carry no writing
+/// position, so they land in a stable top-left grid; a later citation never covers an earlier one.
+fn zotero_badge_area(s: &EditorState, ordinal: usize) -> Rect {
+    const W: i32 = 64;
+    const H: i32 = 64;
+    const GAP: i32 = 12;
+    const COLS: usize = 6;
+    // Clear of the left panel and the clock corner, so a badge stays tappable wherever the page sits
+    // in the viewport.
+    let (w, h) = (W.min(s.pgw.max(W) / 3), H.min(s.pgh.max(H) / 3));
+    let (x0, y0) = (300.min(s.pgw.saturating_sub(w)), 300.min(s.pgh.saturating_sub(h)));
+    let col = ordinal % COLS;
+    let row = ordinal / COLS;
+    let mut x = x0 + col as i32 * (w + GAP);
+    let mut y = y0 + row as i32 * (h + GAP);
+    if x + w > s.pgw { x = x0; y = y0 + (row as i32 + 1) * (h + GAP); }
+    if y + h > s.pgh { y = y0; x = x0 + ((col + 1) % COLS) as i32 * (w + GAP); }
+    Rect { x, y, w, h }
+}
+
+/// Remove one pending citation (memory and inbox file) after it has become a page link or been discarded.
+fn zotero_consume(_a: &mut App, id: &str) {
+    if !bridge_exists() || id.is_empty() {
+        return;
+    }
+    let rest: Vec<ZoteroCitation> = crate::zotero_bridge::pending_citations_take()
+        .into_iter().filter(|c| c.id != id).collect();
+    crate::zotero_bridge::pending_citations_push(&rest);
+    crate::zotero_bridge::inbox_remove(id);
+}
+
+/// Add a sheet row as a citation badge on the open page. `consume` is true for a pending citation.
+fn zotero_add_row(a: &mut App, row: &ZoteroSheetRow, consume: bool) -> bool {
+    if !bridge_exists() || row.item_key.is_empty() {
+        return false;
+    }
+    let s = ed(a);
+    if !s.open || s.nb.id.is_empty() {
+        return false;
+    }
+    let pid = s.open_pid();
+    if pid == 0 {
+        return false;
+    }
+    let ordinal = crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).len();
+    let area = zotero_badge_area(s, ordinal);
+    let seed = crate::zotero_bridge::zotero_seed(pid, row.item_key.as_str());
+    let zref = Zref {
+        pid,
+        seed,
+        area,
+        item_key: row.item_key.clone(),
+        attachment_key: row.attachment_key.clone(),
+        page: row.page,
+        locator: row.locator.clone(),
+        short_cite: row.label.clone(),
+    };
+    let s = ed(a);
+    if !s.zl.links.push(zref) {
+        return false;
+    }
+    s.zl.dirty = true;
+    if consume && row.kind == ZoteroRowKind::Pending {
+        zotero_consume(a, row.id.as_str());
+    }
+    zotero_save(a);
+    true
+}
+
+/// The Zotero handoff for a badge tap, a sheet Open, or a `z:` nav target.
+fn zotero_handoff(a: &mut App, item: &str, attachment: &str, page: u32, locator: &str) -> i32 {
+    if !bridge_exists() || item.is_empty() {
+        return -1;
+    }
+    let (nbid, pid, index) = {
+        let s = ed_ref(a);
+        if !s.open || s.nb.id.is_empty() {
+            (String::new(), 0u32, 0u32)
+        } else {
+            (s.nb.id.to_string(), s.open_pid(), s.index.max(0) as u32)
+        }
+    };
+    let place = if nbid.is_empty() {
+        None
+    } else {
+        Some(crate::zotero_bridge::Handoff::return_to(nbid.as_str(), pid, index))
+    };
+    crate::zotero_bridge::app_request_zotero_handoff(a, item, attachment, page, locator, place)
+}
+
+fn zotero_open_row(a: &mut App, row: &ZoteroSheetRow) {
+    if zotero_handoff(a, row.item_key.as_str(), row.attachment_key.as_str(), row.page, row.locator.as_str()) != 0 {
+        app_toast(a, "Couldn't hand off to Zotero.", 3000);
+    } else {
+        zotero_save(a);
+    }
+}
+
+fn zotero_open_ref(a: &mut App, z: &Zref) {
+    if zotero_handoff(a, z.item_key.as_str(), z.attachment_key.as_str(), z.page, z.locator.as_str()) != 0 {
+        app_toast(a, "Couldn't hand off to Zotero.", 3000);
+    } else {
+        zotero_save(a);
+    }
+}
+
+/// What the sheet asked for: the editor owns the sidecar, the pending inbox and the handoff.
+fn zotero_result(a: &mut App, r: ZsResult, d: Rect) {
+    let consume = matches!(r, ZsResult::Cite(_));
+    if !rect_is_empty(d) {
+        app_invalidate(a, d, RefreshMode::Ui);
+    }
+    match r {
+        ZsResult::Close => {
+            with_modal(a, |s| &mut s.zsheet, |z, _| zotero_sheet_close(z));
+            compose_all(a, RefreshMode::Ui);
+        }
+        ZsResult::Changed | ZsResult::None => compose_all(a, RefreshMode::Ui),
+        ZsResult::Cite(row) | ZsResult::Add(row) => {
+            if zotero_add_row(a, &row, consume) {
+                app_toast(a, "Citation added to this page.", 2200);
+            } else {
+                app_toast(a, "Couldn't add this citation.", 3000);
+            }
+            with_modal(a, |s| &mut s.zsheet, |z, _| zotero_sheet_close(z));
+            compose_all(a, RefreshMode::Full);
+        }
+        ZsResult::Open(row) => zotero_open_row(a, &row),
+        ZsResult::Discard(row) => {
+            zotero_consume(a, row.id.as_str());
+            with_modal(a, |s| &mut s.zsheet, |z, _| { zotero_sheet_refresh(z); });
+            compose_all(a, RefreshMode::Ui);
+        }
+    }
+}
+
+/// Open the Zotero picker from the Links bar (or a named control). With no bridge it is a no-op.
+fn zotero_show(a: &mut App) {
+    if !bridge_exists() {
+        return;
+    }
+    with_modal(a, |s| &mut s.zsheet, |z, a| { zotero_sheet_open(z, a); });
+    compose_all(a, RefreshMode::Ui);
+}
+
+/// The citation badge under a screen point, newest first.
+fn zotero_badge_under(a: &App, x: f32, y: f32) -> Option<Zref> {
+    if !bridge_exists() {
+        return None;
+    }
+    let s = ed_ref(a);
+    if !s.open {
+        return None;
+    }
+    let pid = s.open_pid();
+    if pid == 0 {
+        return None;
+    }
+    crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).iter().rev().find(|z| {
+        let r = page_to_screen(a, z.area);
+        x >= r.x as f32 && x < (r.x + r.w) as f32 && y >= r.y as f32 && y < (r.y + r.h) as f32
+    }).cloned()
+}
+
+/// Draw the page's citation badges, independently of the Eye's link-area setting.
+fn zotero_badges_draw(a: &mut App, r: Rect) {
+    if !bridge_exists() {
+        return;
+    }
+    let pid = ed_ref(a).open_pid();
+    if pid == 0 {
+        return;
+    }
+    let refs: Vec<Zref> = crate::zotero_bridge::zoterolinks_of(&ed_ref(a).zl.links, pid).to_vec();
+    let clip = a.screen.clip;
+    canvas_set_clip(&mut a.screen, r);
+    for z in refs {
+        let sr = page_to_screen(a, z.area);
+        if !rect_overlaps(r, sr) {
+            continue;
+        }
+        ui_frame(&mut a.screen, sr, ui_px(8.0), 255, true, 0);
+        ui_frame(&mut a.screen, sr, ui_px(8.0), 0, false, ui_px(3.0));
+        ui_button(&mut a.screen, sr, IconKind::None, "Z", ButtonStyle::Plain);
+    }
+    a.screen.clip = clip;
+}
+
+/// Copy page `src`'s Zotero badges onto `copy` in the same notebook.
+fn zotero_copy_page(a: &mut App, src: u32, copy: u32) -> bool {
+    if !bridge_exists() || src == copy {
+        return true;
+    }
+    let s = ed(a);
+    if !s.open || s.nb.id.is_empty() {
+        return false;
+    }
+    let from: Vec<Zref> = crate::zotero_bridge::zoterolinks_of(&s.zl.links, src).to_vec();
+    if from.is_empty() {
+        return true;
+    }
+    let mut added = false;
+    for mut z in from {
+        z.pid = copy;
+        z.seed = crate::zotero_bridge::zotero_seed(copy, z.item_key.as_str());
+        added |= ed(a).zl.links.push(z);
+    }
+    if added {
+        ed(a).zl.dirty = true;
+        zotero_save(a);
+    }
+    true
+}
+
+/// Copy Zotero badges for pages copied into another notebook, scaling their areas with the page.
+fn zotero_copy_across(a: &App, out: &[PageCopy], dst_id: &str, dst: &NotebookInfo, sx: f32, sy: f32) -> bool {
+    if !bridge_exists() || out.is_empty() || dst_id.is_empty() {
+        return true;
+    }
+    let mut to = crate::zotero_bridge::zoterolinks_load(dst_id);
+    let src = &ed_ref(a).zl.links;
+    for c in out {
+        for z in crate::zotero_bridge::zoterolinks_of(src, c.from) {
+            let mut n = z.clone();
+            n.pid = c.to;
+            n.seed = crate::zotero_bridge::zotero_seed(c.to, z.item_key.as_str());
+            n.area.x = (z.area.x as f32 * sx).round() as i32;
+            n.area.y = (z.area.y as f32 * sy).round() as i32;
+            n.area.w = (z.area.w as f32 * sx).round() as i32;
+            n.area.h = (z.area.h as f32 * sy).round() as i32;
+            if !to.push(n) {
+                return false;
+            }
+        }
+    }
+    crate::zotero_bridge::zoterolinks_save(dst_id, &mut to, dst) == 0
 }
 
 // The same for the Pages view, with the notebook and its Nav that it reads (the C keeps pointers
@@ -1637,6 +1943,7 @@ pub fn editor_panel_point(a: &mut App, name: &str) -> Option<(f32, f32)> {
     if name=="elsewhere.current" {return s.destination.point(&format!("book.{}",s.nb.id));}
     if let Some(n)=name.strip_prefix("elsewhere."){return s.destination.point(n);}
     if let Some(control)=name.strip_prefix("select."){return sel_control_point(s,control);}
+    if let Some(control)=name.strip_prefix("zotero."){return zotero_sheet_control_point(&s.zsheet,control);}
     if let Some(control)=name.strip_prefix("bar."){return linkbar_control_point(&s.lb,control);}
     if let Some(control)=name.strip_prefix("linkto."){return linkbar_control_point(&s.lt,control);}
     // The Widgets popup's rows: `tap panel widgets.com.example.widget` opens or raises one.
@@ -2987,10 +3294,17 @@ fn draw_menus(a: &mut App, r: Rect) {
         draw_widgets_popup(a);
         a.screen.clip = clip;
     }
+    // Zotero citation badges live on the page and show whether or not the link areas are on.
+    zotero_badges_draw(a, r);
     // The Find sheet's card of rows and keyboard, where r meets them.
     let s = ed_ref(a);
     if s.find.open {
         with_find(a, |f, a, nb, nav| findsheet_draw(f, a, nb, nav, r));
+    }
+    // The Zotero picker, over the page but under the Links bar.
+    let s = ed_ref(a);
+    if s.zsheet.open {
+        with_modal(a, |s| &mut s.zsheet, |z, a| { zotero_sheet_draw(z, a, r); });
     }
     // The Links bar, over everything (laid out again as it is drawn: a turn changes the screen it is on).
     let s = ed_ref(a);
@@ -4025,6 +4339,8 @@ fn close_notebook(a: &mut App) {
     nav_init(&mut s.nav);
     s.dl = DocLinks::default();
     s.wl = WebLinks::default();
+    s.zl.clear();
+    zotero_sheet_close(&mut s.zsheet);
     s.links_dirty = false; // (what a failed flush kept is left for this notebook's next open)
     s.migrate_done = Vec::new();
     s.open = false;
@@ -4083,6 +4399,7 @@ pub fn editor_open_notebook(a: &mut App, id: &str) {
     doclinks_prune(&mut s.dl, &s.nb); // (a tab to a page deleted since the last write is not a tab)
     s.wl = weblinks_load(s.nb.id.as_str());
     weblinks_prune(&mut s.wl, &s.nb);
+    zotero_load(s);
     // The page it opens at was read before its links were: its beta.5 links migrate now, before the
     // first tap.
     s.links_dirty = false;
@@ -4840,6 +5157,7 @@ fn sheet_open(s: &EditorState) -> bool {
         || s.ts.open
         || s.lb.open
         || s.find.open
+        || s.zsheet.open
         || s.lt.open
         || s.card.open
         || s.qs.open
@@ -4857,6 +5175,7 @@ pub fn editor_pen_not_ink(a: &App) -> bool {
             || s.lb.open
             || s.widgets_open
             || s.find.open
+            || s.zsheet.open
             || s.card.open
             || s.qs.open
             || s.lm.state != LmState::Off
@@ -5324,6 +5643,10 @@ fn pages_delete(a: &mut App) {
     if weblinks_prune(&mut s.wl, &s.nb) > 0 {
         s.boxes.stale = true;
     }
+    if crate::zotero_bridge::zoterolinks_prune(&mut s.zl.links, &s.nb) > 0 {
+        s.zl.dirty = true;
+    }
+    zotero_save(a);
     // (the pages' files went to grimoire/trash; the view shows them gone)
     compose_all(a, RefreshMode::Full);
 }
@@ -5419,6 +5742,10 @@ fn pages_copy(a: &mut App, index: i32) {
             s.wl = wl;
             s.boxes.stale = true;
         }
+    }
+    let (src_pid, copy_pid) = (ed_ref(a).nb.page_ids[index as usize], ed_ref(a).nb.page_ids[index as usize + 1]);
+    if !zotero_copy_page(a, src_pid, copy_pid) {
+        links_failed = true;
     }
     pages_added(a, index + 1);
     let s = ed(a);
@@ -6121,6 +6448,7 @@ fn pages_copy_to(a: &mut App, id: &str, at: i32, pids: &[u32]) {
     let docs_ok = doclinks_copy_across(&s.dl, &out, &dst, dw as f32 / sw.max(1) as f32, dh as f32 / sh.max(1) as f32) >= 0;
     // (and their web links, which go wherever their page goes: the same toast when they cannot)
     let docs_ok = weblinks_copy_across(&s.wl, &out, &dst, dw as f32 / sw.max(1) as f32, dh as f32 / sh.max(1) as f32) >= 0 && docs_ok;
+    let docs_ok = zotero_copy_across(a, &out, id, &dst, dw as f32 / sw.max(1) as f32, dh as f32 / sh.max(1) as f32) && docs_ok;
     for c in out.iter().filter(|c| c.erased) {
         if compact_note_page(id, c.to) != 0 {
             qlog!("compact: %s: p%u.qpg (a copy) could not be listed", id, c.to);
@@ -7436,6 +7764,10 @@ fn web_link_under(a: &App, x: f32, y: f32) -> Option<(WebLink, bool)> {
 // growth to a finger's 7 mm too), then a document link (a planner's tab, its growth too), then a web link (2.2: its
 // card): Grimoire's own links to pages win over a web link's area wherever they reach.
 fn link_follow(a: &mut App, x: f32, y: f32) {
+    if let Some(z) = zotero_badge_under(a, x, y) {
+        zotero_open_ref(a, &z);
+        return;
+    }
     let mut l = NavLink::default();
     if !link_under(a, x, y, &mut l) {
         if let Some(d) = doc_link_under(a, x, y) {
@@ -9268,6 +9600,7 @@ fn bar_result(a: &mut App, r: LbResult, d: Rect) {
             app_invalidate(a, g, RefreshMode::Ui);
         }
         LbResult::Docs | LbResult::DocsBack => bar_relayout(a),
+        LbResult::Zotero => zotero_show(a),
         _ => {}
     }
 }
@@ -10598,6 +10931,7 @@ fn close_sheets(a: &mut App) {
     card_drop(s);
     bar_drop(s);
     find_drop(s);
+    zotero_sheet_close(&mut s.zsheet);
     s.qs = QuickSize::default();
     s.paper_open = false;
     s.dm.open = false;
@@ -10986,6 +11320,7 @@ fn corner_sheet_open(s: &EditorState) -> bool {
         || s.paper_open
         || s.ts.open
         || s.lb.open
+        || s.zsheet.open
         || (s.find.open && s.find.mode != FindMode::Pick)
 }
 
@@ -11003,6 +11338,7 @@ fn phase2_surface_at(s: &EditorState, x: i32, y: i32) -> bool {
         || (s.qs.open && rect_contains(s.qs.rect, x, y))
         || (s.lt.open && !s.lt.hidden && rect_contains(s.lt.rect, x, y))
         || (s.find.open && rect_contains(s.find.rect, x, y))
+        || (s.zsheet.open && rect_contains(s.zsheet.rect, x, y))
         || ((s.lm.state == LmState::Armed || s.lm.state == LmState::Lasso) && rect_contains(s.lm.strip, x, y))
         || kb_at(&s.card.kb)
         || kb_at(&s.lm.kb)
@@ -11030,7 +11366,8 @@ pub fn editor_control_at(a: &App, x: f32, y: f32) -> bool {
         return doc_link_under(a, x, y).is_some();
     }
     let mut l = NavLink::default();
-    link_under(a, x, y, &mut l) || doc_link_under(a, x, y).is_some() || web_link_under(a, x, y).is_some()
+    link_under(a, x, y, &mut l) || doc_link_under(a, x, y).is_some()
+        || web_link_under(a, x, y).is_some() || zotero_badge_under(a, x, y).is_some()
 }
 
 /// Whether the finger lift being handled was a tap in the corner, which the clock took (status.rs
@@ -11063,7 +11400,7 @@ fn fs_can_arm(a: &App, in_links_bar: bool) -> bool {
     if gesturemap_shapes(&a.gestures).is_empty() && !gesturemap_has_onefinger(&a.gestures) {
         return false;
     }
-    if s.pv.open || s.tools_open || s.widgets_open || s.mb.open || s.dm.open || s.paper_open || s.ts.open || s.find.open || s.lt.open || s.card.open || s.qs.open
+    if s.pv.open || s.tools_open || s.widgets_open || s.mb.open || s.dm.open || s.paper_open || s.ts.open || s.find.open || s.zsheet.open || s.lt.open || s.card.open || s.qs.open
         || s.lm.state != LmState::Off || s.pv.kb.open || s.find.kb.open || s.lm.kb.open || s.card.kb.open || s.add_kb.open
     {
         return false;
@@ -11764,6 +12101,24 @@ fn editor_event_in(a: &mut App, ev: &InEvent) {
             }
             return;
         }
+        // The Zotero sheet takes every contact while it is up, like Find: a contact outside it closes it
+        // (a finger at the lift, a pen at its down).
+        if s.zsheet.open {
+            if rect_contains(s.zsheet.rect, ev.x as i32, ev.y as i32) {
+                s.owner = Owner::Zotero;
+                let mut d = RECT_EMPTY;
+                let r = with_modal(a, |s| &mut s.zsheet, |z, a| zotero_sheet_pointer(z, a, 0, ev, &mut d));
+                zotero_result(a, r, d);
+            } else {
+                s.owner = Owner::Outside;
+                if pen {
+                    with_modal(a, |s| &mut s.zsheet, |z, _| zotero_sheet_close(z));
+                } else {
+                    press_begin(&mut s.link_press, ev.x, ev.y, ev.t_ms);
+                }
+            }
+            return;
+        }
         // The Find sheet: its rows and keyboard take the contact, a contact outside it is swallowed (a finger
         // decides at the lift, a pen at its down) and closes it.
         if s.find.open {
@@ -12156,6 +12511,14 @@ fn owner_pointer(a: &mut App, ph: i32, ev: &InEvent, pen: bool) {
                 ed(a).owner = Owner::None;
             }
             find_result(a, r, d);
+        }
+        Owner::Zotero => {
+            let mut d = RECT_EMPTY;
+            let r = with_modal(a, |s| &mut s.zsheet, |z, a| zotero_sheet_pointer(z, a, ph, ev, &mut d));
+            if ph == 2 {
+                ed(a).owner = Owner::None;
+            }
+            zotero_result(a, r, d);
         }
         Owner::Bar => {
             let mut d = RECT_EMPTY;
@@ -12857,6 +13220,43 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
         csnprintf!(out,cap,"%s",&text);
         return 0;
     }
+    if let Some(k) = key.strip_prefix("zotero.") {
+        let Some(s) = a.ed.as_deref() else { out.clear(); return -1; };
+        if let Some(sub) = k.strip_prefix("sheet.") {
+            return if zotero_sheet_probe(&s.zsheet, sub, out, cap) { 0 } else { -1 };
+        }
+        let pid = s.open_pid();
+        match k {
+            "sheet" => { csnprintf!(out, cap, "%d", s.zsheet.open as i32); }
+            "show" => { csnprintf!(out, cap, "%d", bridge_exists() as i32); }
+            "links" => { csnprintf!(out, cap, "%d", crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).len() as i32); }
+            "all_links" => { csnprintf!(out, cap, "%d", s.zl.links.links.len() as i32); }
+            "pid" => { csnprintf!(out, cap, "%u", pid); }
+            "dirty" => { csnprintf!(out, cap, "%d", s.zl.dirty as i32); }
+            "pending" => { csnprintf!(out, cap, "%d", crate::zotero_bridge::pending_citations().len() as i32); }
+            "badges" => { csnprintf!(out, cap, "%d", crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).len() as i32); }
+            _ => {
+                let n = k.strip_prefix("badge.").and_then(|x| x.split_once('.')).and_then(|(n, _)| n.parse::<usize>().ok()).and_then(|n| n.checked_sub(1));
+                if let Some(n) = n {
+                    let refs = crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid);
+                    let Some(z) = refs.get(n) else { return -1; };
+                    let field = k.strip_prefix("badge.").and_then(|x| x.split_once('.')).map(|(_, f)| f).unwrap_or("");
+                    let _ = match field {
+                        "item" => csnprintf!(out, cap, "%s", z.item_key.as_str()),
+                        "attachment" => csnprintf!(out, cap, "%s", z.attachment_key.as_str()),
+                        "page" => csnprintf!(out, cap, "%u", z.page),
+                        "locator" => csnprintf!(out, cap, "%s", z.locator.as_str()),
+                        "cite" => csnprintf!(out, cap, "%s", z.short_cite.as_str()),
+                        "area" => csnprintf!(out, cap, "%d %d %d %d", z.area.x, z.area.y, z.area.w, z.area.h),
+                        _ => return -1,
+                    };
+                } else {
+                    return -1;
+                }
+            }
+        }
+        return 0;
+    }
     if key=="pages.screen" {let pv=&ed_ref(a).pv;csnprintf!(out,cap,"%d",if !pv.open {0} else if pv.index_tab {pv.index_screen+1} else {pv.screen+1});return 0;}
     // Where `tap panel NAME` taps, "X Y" (empty for none): a script holds the toolbar's + there (editor.at.next).
     if let Some(name)=key.strip_prefix("at.") {
@@ -13223,7 +13623,11 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
         let (x, y) = (atoi(xs), atoi(ys));
         let here = s.open && a.scr == ScreenId::Editor;
         let strip = here && (s.lm.state == LmState::Armed || s.lm.state == LmState::Lasso);
-        let name = if here && s.card.open {
+        let name = if here && s.zsheet.open {
+            zotero_sheet_hit_name(&s.zsheet, x, y)
+        } else if here && zotero_badge_under(a, x as f32, y as f32).is_some() {
+            "zotero.badge".to_string()
+        } else if here && s.card.open {
             linkcard_hit_name(&s.card, x, y)
         } else if here && s.lt.open {
             linkbar_hit_name(&s.lt, x, y)
@@ -16613,6 +17017,10 @@ fn destination_open(a:&mut App) {
     else {app_toast(a,tr("Couldn't read notebooks."),3000);}
 }
 fn follow_target(a:&mut App,target:&str)->bool {
+    if let Some(z) = crate::zotero_bridge::zotero_target_decode(target) {
+        zotero_open_ref(a, &z);
+        return true;
+    }
     if let Some((id,pid))=nav_external_target(target) {
         open_external_page(a,id,pid,true)
     } else if target=="index" {map_show(a,false);ed_ref(a).map.open}

@@ -50,6 +50,8 @@ const LB_PAGES: i32 = 12;
 const LB_CANCEL: i32 = 13;
 const LB_AROUND: i32 = 14;
 const LB_NAME: i32 = 15;
+/// The Zotero sheet button, in the list-mode tool row, only while a bridge directory is present.
+const LB_ZOTERO: i32 = 16;
 
 /// The bar lists the page's links (List), or it is Link to..., picking where a new link goes (Pick).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -119,6 +121,8 @@ pub enum LbResult {
     Choose,
     /// the pressed button was let go: its rect is to be refreshed
     Changed,
+    /// the Zotero button: open the editor's Zotero sheet
+    Zotero,
 }
 
 /// One row of the bar: a place the page's links go to.
@@ -763,7 +767,11 @@ pub fn linkbar_draw(lb: &mut LinkBar, a: &mut App, nb: &NotebookInfo, nav: &Nav,
         }
         hits_add(&mut lb.hits, r, LB_CHIP, i);
     }
-    let ty=card.y+card.h-u(160.0);let gap=u(20.0);let width=(inn.w-2*gap)/3;
+    // The Zotero button is added only with a bridge directory: without one the three-button row keeps
+    // exactly the geometry (and hit coordinates) it has always had.
+    let zotero = bridge_exists();
+    let n = if zotero { 4 } else { 3 };
+    let ty=card.y+card.h-u(160.0);let gap=u(20.0);let width=(inn.w-(n-1)*gap)/n;
     let name=Rect::new(inn.x,ty,width,u(140.0));
     ui_button(c,name,IconKind::None,tr("Name page"),if nav.writable{ButtonStyle::Plain}else{ButtonStyle::Disabled});
     if nav.writable {hits_add(&mut lb.hits,name,LB_NAME,0);}
@@ -772,6 +780,11 @@ pub fn linkbar_draw(lb: &mut LinkBar, a: &mut App, nb: &NotebookInfo, nav: &Nav,
     let eye=Rect::new(inn.x+2*(width+gap),ty,width,u(140.0));
     ui_button(c,eye,IconKind::Eye,tr("Areas"),if a.settings.link_areas{ButtonStyle::Selected}else{ButtonStyle::Plain});
     if lb.links_ok {hits_add(&mut lb.hits,eye,LB_AREAS,0);}lb.eye_button=eye;
+    if zotero {
+        let z=Rect::new(inn.x+3*(width+gap),ty,width,u(140.0));
+        ui_button(c,z,IconKind::None,"Zotero",ButtonStyle::Plain);
+        hits_add(&mut lb.hits,z,LB_ZOTERO,0);
+    }
     card
 }
 
@@ -866,6 +879,7 @@ pub fn linkbar_pointer(lb: &mut LinkBar, a: &mut App, ph: i32, ev: &InEvent, dir
         LB_NEW => LbResult::NewLink,
         LB_NAME => LbResult::NamePage,
         LB_AREAS => LbResult::Eye,
+        LB_ZOTERO => LbResult::Zotero,
         LB_INDEX => LbResult::Index,
         LB_AROUND => LbResult::Around,
         _ => LbResult::None,
@@ -939,6 +953,8 @@ pub fn linkbar_probe(lb: &LinkBar, key: &str, out: &mut String, cap: usize) -> b
         csnprintf!(out, cap, "%s", &if lb.open { linkbar_back_text(lb, 0) } else { String::new() });
     } else if key == "incoming" {
         csnprintf!(out, cap, "%d", lb.incoming);
+    } else if key == "zotero" {
+        csnprintf!(out, cap, "%d", lb.hits.h.iter().any(|h| h.id == LB_ZOTERO) as i32);
     } else if key == "docs" {
         // How many document links the open page has (the "From the PDF" row's number), 0 closed.
         csnprintf!(out, cap, "%d", if lb.open { lb.doc_links } else { 0 });
@@ -1257,6 +1273,18 @@ pub fn linkbar_hit_name(lb: &LinkBar, x: i32, y: i32) -> String {
     }
 }
 
+/// The name of a list-mode tool row button at screen point (x, y). The Zotero button is the only one
+/// the runner needs by name; it is absent unless a bridge directory is present.
+pub fn linkbar_list_hit_name(lb: &LinkBar, x: i32, y: i32) -> String {
+    if !lb.open || lb.hidden || lb.mode != LbMode::List {
+        return String::new();
+    }
+    match hits_find(&lb.hits, x as f32, y as f32) {
+        Some(h) if h.id == LB_ZOTERO => "bar.zotero".to_string(),
+        _ => String::new(),
+    }
+}
+
 /// The runner's keys for Link to... (pick mode), without "editor.linkto.": "rect" (its card, empty closed),
 /// "dock" (top or bottom), "chips" (how many, all screens), "N" (chip N from 1: new, index, recent p<page>,
 /// p<page>, then " current" on the marked target; empty past the last), "screen" (S/T). false for another key.
@@ -1313,7 +1341,7 @@ pub fn linkbar_control_point(lb:&LinkBar,name:&str)->Option<(f32,f32)> {
             _=>return None,
         }
     } else {
-        if let Some(chip)=name.strip_prefix("chip.") {(LB_CHIP,chip.parse::<i32>().ok()?-1)} else {(match name {"name"=>LB_NAME,"goto"=>LB_GO,"back"=>LB_BACK,"index"=>LB_INDEX,"incoming"=>LB_AROUND,"new"=>LB_NEW,"areas"=>LB_AREAS,"close"=>LB_X,_=>return None},0)}
+        if let Some(chip)=name.strip_prefix("chip.") {(LB_CHIP,chip.parse::<i32>().ok()?-1)} else {(match name {"name"=>LB_NAME,"goto"=>LB_GO,"back"=>LB_BACK,"index"=>LB_INDEX,"incoming"=>LB_AROUND,"new"=>LB_NEW,"areas"=>LB_AREAS,"zotero"=>LB_ZOTERO,"close"=>LB_X,_=>return None},0)}
     };
     lb.hits.h.iter().find(|h|h.id==id&&h.arg==arg).map(|h|((h.r.x+h.r.w/2) as f32,(h.r.y+h.r.h/2) as f32))
 }

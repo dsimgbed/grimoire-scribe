@@ -434,6 +434,9 @@ fn run() -> i32 {
         display_close();
         return 1;
     }
+    // The bridge's startup half runs after the app is up (so a return handoff can open its essay)
+    // and before the first frame is presented. With no bridge directory it does nothing at all.
+    crate::zotero_bridge::bridge_startup(&mut app);
     app_flush(&mut app);
     qlog!("first frame presented");
     // Grimoire's own Terminess in KOReader's fonts/Grimoire follows this build's (an update can
@@ -565,6 +568,13 @@ fn run() -> i32 {
     display_wait();
     input_close();
     display_close(); // (a headless run whose expect checks failed exits here, with status 3)
+    // A handoff's code is the launcher's: return it only now that the notebook is saved and both
+    // descriptors are closed, never earlier. No handoff leaves the ordinary status (or the sim
+    // fit-check's) alone.
+    if app.exit_code != EXIT_CLEAN {
+        qlog!("bridge: exiting with handoff status %d", app.exit_code);
+        return app.exit_code;
+    }
     #[cfg(feature = "sim")]
     {
         let cuts = FIT.with(|f| f.borrow().cuts);

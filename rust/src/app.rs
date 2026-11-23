@@ -71,6 +71,9 @@ pub struct App {
     pub scr: ScreenId,
     pub prev_scr: ScreenId,
     pub running: bool,
+    /// The status the launcher sees when the loop ends. Only a clean Grimoire → Zotero handoff sets
+    /// this to EXIT_HANDOFF_TO_ZOTERO (42); an ordinary exit stays EXIT_CLEAN (0).
+    pub exit_code: i32,
     /// Live view's watermark: the live_seq of the newest captured event a screen has finished
     /// handling, and that event's in_sample_ms. app_flush hands them to live_presented once every
     /// pixel the event dirtied is in the stream, so a batch never retires ink it does not show yet.
@@ -453,6 +456,14 @@ pub fn app_handed_over() -> bool {
     !app_host().is_empty() && ["GRIMOIRE_ANNOTATE", "GRIMOIRE_BOOK"].iter().any(|k| getenv(k).as_deref() == Some("1"))
 }
 
+/// Bridge entry point, named as an app call for the screens: write the handoff, stop the loop and
+/// arm the launcher's exit code. The saving and descriptor close still belong to mainloop::run.
+/// (The bridge's own entry point keeps the same name without the app prefix; it is not re-exported
+/// here under that name, so the prelude's glob has no ambiguity.)
+pub fn app_request_handoff_exit(a: &mut App, h: &crate::zotero_bridge::Handoff) -> i32 {
+    crate::zotero_bridge::app_request_handoff(a, h)
+}
+
 // The sleep screen to use. Hosted, KOReader keeps the Kindle UI paused for its whole session and
 // the launcher never wakes it, so the Kindle's own screensaver (mode 2) cannot show: the page
 // does instead.
@@ -833,7 +844,7 @@ pub fn app_init(a: &mut App, w: i32, h: i32, dpi: f32) -> i32 {
 
 /// saves everything
 pub fn app_shutdown(a: &mut App) {
-    if a.scr == ScreenId::Editor {
+    if a.ed.is_some() {
         editor_save_now(a);
     }
     (ops(a.scr).leave)(a);
