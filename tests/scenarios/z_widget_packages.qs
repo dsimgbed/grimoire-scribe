@@ -4,7 +4,9 @@
 # The widget package manager: an installed package appears in Packages → Widgets and in the widget
 # popup, a frame opens from it, Remove asks first, and Install from repository... opens the repository
 # keyboard.
-wait 300
+# (The app repaints once more about 3.5 s after it starts, mainloop.rs: the scenario starts after that, so the check
+# below that a tap on empty paper refreshes nothing never meets it on a fast machine, issue #226.)
+wait 3600
 # From the Library: Settings → Packages → Widgets, then the X closes Settings back to the Library.
 tap library settings
 wait 400
