@@ -914,9 +914,9 @@ static ACTIONS: [ActionInfo; 93] = [
     nm(
         SHORTCUT_STATUS_CORNER,
         "status-corner",
-        n_("Clock and battery corner"),
+        n_("Notebook status bar"),
         GROUP_MENUS,
-        IconKind::Clock,
+        IconKind::Expand,
         ActionKind::Cycle,
     ),
     nm(

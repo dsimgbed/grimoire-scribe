@@ -11720,14 +11720,14 @@ mod tests {
         {
             let s = lib(&mut a);
             assert_eq!(s.modal, Modal::Display);
-            assert_eq!(s.dm.page, crate::dispmenu::DmPage::Clock);
+            assert_eq!(s.dm.page, crate::dispmenu::DmPage::StatusBar);
         }
         let mut dm = std::mem::take(&mut lib(&mut a).dm);
         dispmenu_draw(&mut dm, &mut a);
-        for name in ["size", "corner", "time12"] {
-            assert!(dispmenu_control_point(&dm, name).is_some(), "Clock settings lost {name}");
+        for name in ["size", "time12"] {
+            assert!(dispmenu_control_point(&dm, name).is_some(), "Status bar settings lost {name}");
         }
-        for name in ["sleep", "sleep_after", "brightness", "invert", "fit"] {
+        for name in ["corner", "sleep", "sleep_after", "brightness", "invert", "fit"] {
             assert!(dispmenu_control_point(&dm, name).is_none(), "Clock settings shows {name}");
         }
         lib(&mut a).dm = dm;

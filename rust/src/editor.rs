@@ -360,6 +360,31 @@ struct WidgetDragView {
     samples_at_last_show: u32,
 }
 
+/// A one-finger downward pull that starts on the top edge: its start, and whether it has travelled
+/// far enough to open the quick settings panel.
+#[derive(Clone, Copy, Debug, Default)]
+struct QuickPull {
+    active: bool,
+    x0: f32,
+    y0: f32,
+}
+
+/// The quick settings panel: pulled down from the top edge with one finger. It holds the two light
+/// sliders and the three buttons at the top, plus the touch that is on them now.
+#[derive(Default)]
+struct QuickBar {
+    open: bool,
+    rect: Rect,
+    hits: HitList,
+    bright: Slider,
+    warm: Slider,
+    /// 1 brightness, 2 warmth, 0 nothing dragged
+    active: i32,
+    /// where the contact came down, for a tap
+    down: Option<(f32, f32)>,
+    pull: QuickPull,
+}
+
 #[derive(Default)]
 pub struct EditorState {
     /// when the open page's Pages preview was last made from its canvas (save_page), and whether the
@@ -576,6 +601,8 @@ pub struct EditorState {
     /// was asked for, 2 once a pass of the loop has presented the screen (editor_tick writes it then, so the
     /// card's close never waits for the storage)
     qs_save: u8,
+    /// the quick settings panel pulled down from the top edge
+    quick: QuickBar,
     /// the targets ("p<page id>") links were made to this session, newest last, at most RECENT_MAX: Link to...'s
     /// Recent targets. Memory only; the notebook's closing clears it.
     recent: Vec<FixedStr<NAV_TARGET_LEN>>,
@@ -2741,6 +2768,10 @@ fn compose(a: &mut App, r: Rect) {
 /// Display, Custom music, the tool picker, Find with its keyboard, and the Links bar over everything; each where
 /// it meets r. The panel is under all of them, and only ever over the notebook page.
 fn draw_menus(a: &mut App, r: Rect) {
+    if ed_ref(a).quick.open {
+        draw_quickbar(a);
+        return;
+    }
     if ed_ref(a).pv.open && ed_ref(a).pv.overlay {
         with_pv(a,|pv,a,_,_|pagesview_draw_overlay(pv,a));
         return;
@@ -4621,6 +4652,7 @@ fn sheet_open(s: &EditorState) -> bool {
         || s.lt.open
         || s.card.open
         || s.qs.open
+        || s.quick.open
 }
 
 /// Whether the pen's next contact is no ink: the Links bar is up (a tap on it, or outside it, which closes or
@@ -4637,6 +4669,7 @@ pub fn editor_pen_not_ink(a: &App) -> bool {
             || s.find.open
             || s.card.open
             || s.qs.open
+            || s.quick.open
             || s.lm.state != LmState::Off
             || s.sel.state != SelState::Off
             || (s.owner == Owner::Outside && s.owner_is_pen)
@@ -10333,6 +10366,7 @@ fn close_sheets(a: &mut App) {
     bar_drop(s);
     find_drop(s);
     s.qs = QuickSize::default();
+    s.quick = QuickBar::default();
     s.paper_open = false;
     s.dm.open = false;
     s.mb.open = false;
@@ -10681,6 +10715,7 @@ fn corner_sheet_open(s: &EditorState) -> bool {
         || s.tools_open
         || s.mb.open
         || s.dm.open
+        || s.quick.open
         || s.paper_open
         || s.ts.open
         || s.lb.open
@@ -11295,6 +11330,306 @@ fn editor_gesture(a: &mut App, ev: &InEvent) {
     editor_shortcut_at(a, action, ev.x2, ev.y2, ActionSrc::Touch);
 }
 
+const Q_CLOSE: i32 = 1;
+const Q_BRIGHT: i32 = 2;
+const Q_WARM: i32 = 3;
+const Q_SETTINGS: i32 = 4;
+const Q_ROTATION: i32 = 5;
+const Q_AUTO: i32 = 6;
+
+/// The top edge a one-finger pull starts from: the status bar while it is shown, and a small strip
+/// along the top of the page when it is off.
+fn quick_top_edge(a: &App) -> i32 {
+    status_reserved(a).max(ui_px(36.0))
+}
+
+/// The quick settings panel's touch, the pull from the top that opens it, or neither. True when the
+/// event is the panel's or the pull's (the page and toolbar see nothing of it).
+fn quick_event(a: &mut App, ev: &InEvent) -> bool {
+    if ed_ref(a).quick.open {
+        if touch_cancelled(ev) {
+            let mut q = std::mem::take(&mut ed(a).quick);
+            if q.active != 0 {
+                if q.active == 1 { light_set_intensity(q.bright.value as i32); }
+                else { light_set_warmth(q.warm.value as i32); }
+                settings_save(&a.settings);
+            }
+            q.active = 0;
+            q.down = None;
+            ed(a).quick = q;
+            quickbar_redraw(a);
+            return true;
+        }
+        let ph = app_pointer_phase(ev);
+        if ph >= 0 {
+            quickbar_pointer(a, ph, ev);
+            return true;
+        }
+        return false;
+    }
+    let s = ed_ref(a);
+    if ev.type_ == InType::TouchDown
+        && s.open
+        && !sheet_open(s)
+        && !editor_busy(a)
+        && ev.y <= quick_top_edge(a) as f32
+    {
+        let q = &mut ed(a).quick;
+        q.pull = QuickPull { active: true, x0: ev.x, y0: ev.y };
+        return true;
+    }
+    let pull = ed_ref(a).quick.pull;
+    if !pull.active {
+        return false;
+    }
+    match ev.type_ {
+        InType::TouchMove => {
+            let dy = ev.y - pull.y0;
+            let dx = ev.x - pull.x0;
+            if dy >= ui_px(64.0) as f32 && dy.abs() > dx.abs() * 1.2 {
+                quickbar_open(a);
+            }
+            true
+        }
+        InType::TouchUp | InType::PinchBegin | InType::PinchMove | InType::PinchEnd => {
+            ed(a).quick.pull = QuickPull::default();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Opens the quick settings panel from a pull: reads the light once, then draws it over the page.
+fn quickbar_open(a: &mut App) {
+    let (mut intensity, mut warmth) = light_cached();
+    if intensity < 0 || warmth < 0 {
+        light_get(&mut intensity, &mut warmth);
+    }
+    let mut q = std::mem::take(&mut ed(a).quick);
+    q.open = true;
+    q.pull = QuickPull::default();
+    q.down = None;
+    q.active = 0;
+    q.bright = Slider {
+        min: 0.0,
+        max: LIGHT_MAX as f32,
+        step: 1.0,
+        value: intensity.max(0) as f32,
+        label: tr("Brightness"),
+        text_w: ui_px(360.0),
+        ..Default::default()
+    };
+    q.warm = Slider {
+        min: 0.0,
+        max: LIGHT_MAX as f32,
+        step: 1.0,
+        value: warmth as f32,
+        label: tr("Warmth"),
+        text_w: ui_px(360.0),
+        ..Default::default()
+    };
+    ed(a).quick = q;
+    quickbar_redraw(a);
+}
+
+/// Closes the panel and puts the page (and the status bar) back under where it was.
+fn quickbar_close(a: &mut App) {
+    let mut q = std::mem::take(&mut ed(a).quick);
+    let r = q.rect;
+    q.open = false;
+    q.active = 0;
+    q.down = None;
+    q.pull = QuickPull::default();
+    ed(a).quick = q;
+    if !rect_is_empty(r) {
+        compose(a, r);
+        app_invalidate(a, r, RefreshMode::Ui);
+    }
+}
+
+/// Draws the panel from its state in the editor and refreshes its patch.
+fn quickbar_redraw(a: &mut App) {
+    draw_quickbar(a);
+    let r = ed_ref(a).quick.rect;
+    if !rect_is_empty(r) {
+        app_invalidate(a, r, RefreshMode::Ui);
+    }
+}
+
+/// The panel's touch: a slider follows the finger, a button acts at the lift, and a tap outside
+/// closes it. A drag of a slider saves at its release.
+fn quickbar_pointer(a: &mut App, ph: i32, ev: &InEvent) {
+    let (x, y) = (ev.x, ev.y);
+    let mut id = 0;
+    let mut slider = 0;
+    let mut save = false;
+    {
+        let q = &mut ed(a).quick;
+        if ph == 0 {
+            q.down = Some((x, y));
+            q.active = 0;
+            if rect_contains(q.rect, x as i32, y as i32) {
+                if rect_contains(q.bright.r, x as i32, y as i32) {
+                    q.active = 1;
+                    ui_slider_set_from_x(&mut q.bright, x);
+                } else if rect_contains(q.warm.r, x as i32, y as i32) {
+                    q.active = 2;
+                    ui_slider_set_from_x(&mut q.warm, x);
+                }
+            }
+            slider = q.active;
+        } else if q.active != 0 {
+            slider = q.active;
+            if slider == 1 {
+                ui_slider_set_from_x(&mut q.bright, x);
+            } else {
+                ui_slider_set_from_x(&mut q.warm, x);
+            }
+            if ph == 2 {
+                q.active = 0;
+                save = true;
+            }
+        } else if ph == 2 {
+            let down = q.down.take();
+            let tap = down.is_some_and(|(x0, y0)| {
+                (x - x0).abs() <= ui_px(30.0) as f32 && (y - y0).abs() <= ui_px(30.0) as f32
+            });
+            if tap {
+                if !rect_contains(q.rect, x as i32, y as i32) {
+                    id = Q_CLOSE;
+                } else if let Some(h) = hits_find(&q.hits, x, y) {
+                    id = h.id;
+                }
+            }
+        }
+    }
+    if slider == 1 {
+        let v = ed_ref(a).quick.bright.value as i32;
+        light_set_intensity(v);
+    } else if slider == 2 {
+        let v = ed_ref(a).quick.warm.value as i32;
+        light_set_warmth(v);
+    }
+    if slider != 0 || save {
+        if save {
+            settings_save(&a.settings);
+        }
+        quickbar_redraw(a);
+    }
+    match id {
+        Q_CLOSE => quickbar_close(a),
+        Q_SETTINGS => quickbar_settings(a),
+        Q_ROTATION => {
+            a.settings.rotation_lock = if a.settings.rotation_lock == 0 { 1 + a.rotation } else { 0 };
+            if a.settings.rotation_lock == 0 && a.settings.follow_rotation {
+                let caps = input_caps();
+                if caps.has_orientation { a.pending_rotation = caps.orientation; }
+            } else {
+                a.pending_rotation = -1;
+            }
+            settings_save(&a.settings);
+            quickbar_redraw(a);
+        }
+        Q_AUTO => {
+            if light_auto() >= 0 {
+                let on = light_auto() == 0;
+                if !on {
+                    let (mut i, mut w) = (0, 0);
+                    light_get(&mut i, &mut w);
+                }
+                light_set_auto(on);
+                let (mut i, mut w) = (0, 0);
+                light_get(&mut i, &mut w);
+                let q = &mut ed(a).quick;
+                if i >= 0 { q.bright.value = i as f32; }
+                if w >= 0 { q.warm.value = w as f32; }
+                quickbar_redraw(a);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Settings from the quick panel: save the page as the panel's button does, close every sheet and
+/// open Settings, which knows to come back to the notebook.
+fn quickbar_settings(a: &mut App) {
+    fs_abort_view(a, FsAbortView::Screen);
+    settle_now(a);
+    if save_page(a) {
+        links_flush(a);
+        pb_reset(ed(a));
+        close_sheets(a);
+        crate::library::library_settings_from_notebook(a);
+    }
+}
+
+fn draw_quickbar(a: &mut App) {
+    let mut q = std::mem::take(&mut ed(a).quick);
+    quickbar_draw(&mut q, a);
+    ed(a).quick = q;
+}
+
+fn quickbar_draw(q: &mut QuickBar, a: &mut App) {
+    if !q.open {
+        return;
+    }
+    hits_clear(&mut q.hits);
+    let pad = ui_px(30.0);
+    let h = ui_px(640.0).min(a.h - ui_px(24.0)).max(ui_px(380.0));
+    q.rect = Rect::new(0, 0, a.w, h);
+    canvas_fill(&mut a.screen, q.rect, 255);
+    canvas_fill(&mut a.screen, Rect::new(0, h - ui_px(4.0), a.w, ui_px(4.0)), 0);
+    let close = ui_px(96.0);
+    let close_r = Rect::new(a.w - pad - close, pad, close, close);
+    ui_button(&mut a.screen, close_r, IconKind::Close, "", ButtonStyle::Plain);
+    hits_add(&mut q.hits, close_r, Q_CLOSE, 0);
+    let title_r = Rect::new(pad, pad, (a.w - pad * 3 - close).max(1), close);
+    ui_text(&mut a.screen, FontFace::Bold, ui_title_size(), ui_small_size(), title_r, tr("Quick settings"), 1, false, 0);
+
+    let gap = ui_px(16.0);
+    let by = pad + close + ui_px(20.0);
+    let bh = ui_px(130.0);
+    let bw = (a.w - pad * 2 - gap * 2) / 3;
+    let b1 = Rect::new(pad, by, bw, bh);
+    let b2 = Rect::new(pad + bw + gap, by, bw, bh);
+    let b3 = Rect::new(pad + (bw + gap) * 2, by, bw, bh);
+    ui_button(&mut a.screen, b1, IconKind::Gear, tr("Settings"), ButtonStyle::Plain);
+    hits_add(&mut q.hits, b1, Q_SETTINGS, 0);
+    let locked = a.settings.rotation_lock != 0;
+    ui_button(&mut a.screen, b2, IconKind::Expand, if locked { tr("Rotation locked") } else { tr("Rotation lock") }, if locked { ButtonStyle::Selected } else { ButtonStyle::Plain });
+    hits_add(&mut q.hits, b2, Q_ROTATION, 0);
+    let auto = light_auto();
+    ui_button(&mut a.screen, b3, IconKind::Brightness, tr("Auto brightness"), if auto > 0 { ButtonStyle::Selected } else if auto < 0 { ButtonStyle::Disabled } else { ButtonStyle::Plain });
+    hits_add(&mut q.hits, b3, Q_AUTO, 0);
+
+    let mut y = by + bh + ui_px(30.0);
+    let row_h = ui_px(116.0);
+    let have = light_available();
+    if have && q.bright.value >= 0.0 {
+        q.bright.r = Rect::new(pad, y, a.w - pad * 2, row_h);
+        let row = q.bright.r;
+        ui_slider_layout(&mut q.bright, row);
+        let bt = format!("{}", q.bright.value as i32);
+        ui_slider_draw(&mut a.screen, &q.bright, Some(&bt));
+        hits_add(&mut q.hits, q.bright.r, Q_BRIGHT, 0);
+        y += row_h + gap;
+    }
+    if have && q.warm.value >= 0.0 {
+        q.warm.r = Rect::new(pad, y, a.w - pad * 2, row_h);
+        let row = q.warm.r;
+        ui_slider_layout(&mut q.warm, row);
+        let wt = format!("{}", q.warm.value as i32);
+        ui_slider_draw(&mut a.screen, &q.warm, Some(&wt));
+        hits_add(&mut q.hits, q.warm.r, Q_WARM, 0);
+        y += row_h + gap;
+    }
+    if !have {
+        ui_text(&mut a.screen, FontFace::Regular, ui_text_size(), ui_small_size(), Rect::new(pad, y, a.w - pad * 2, row_h), tr("Front light controls are not available here."), 2, false, 0);
+    } else if q.warm.value < 0.0 {
+        ui_text(&mut a.screen, FontFace::Regular, ui_text_size(), ui_small_size(), Rect::new(pad, y, a.w - pad * 2, row_h), tr("This Kindle has no warmth control."), 2, false, 0);
+    }
+}
+
 fn editor_event_in(a: &mut App, ev: &InEvent) {
     // The picture pick over the page (#146): every contact is its (no gesture does anything there, as in pick mode)
     if ed_ref(a).files.open {
@@ -11345,12 +11680,7 @@ fn editor_event_in(a: &mut App, ev: &InEvent) {
         }
     }
 
-    if status_reserved(a) > 0
-        && ev.y < status_reserved(a) as f32
-        && a.ed.as_deref().is_some_and(|s| s.open && !sheet_open(s))
-        && app_pointer_phase(ev) == 0
-        && !editor_busy(a)
-    {
+    if quick_event(a, ev) {
         return;
     }
     let s = ed(a);
@@ -12554,6 +12884,17 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
         return 0;
     }
     if key=="pages.screen" {let pv=&ed_ref(a).pv;csnprintf!(out,cap,"%d",if !pv.open {0} else if pv.index_tab {pv.index_screen+1} else {pv.screen+1});return 0;}
+    if key=="quick" {csnprintf!(out,cap,"%d",ed_ref(a).quick.open as i32);return 0;}
+    if key=="quick.brightness" || key=="quick.warmth" {
+        let q=&ed_ref(a).quick;
+        let v=if key=="quick.brightness" {q.bright.value} else {q.warm.value};
+        csnprintf!(out,cap,"%d",v as i32);return 0;
+    }
+    if key=="quick.bright.rect" || key=="quick.warm.rect" || key=="quick.rect" {
+        let q=&ed_ref(a).quick;
+        let r=if key=="quick.bright.rect" {q.bright.r} else if key=="quick.warm.rect" {q.warm.r} else {q.rect};
+        csnprintf!(out,cap,"%d %d %d %d",r.x,r.y,r.w,r.h);return 0;
+    }
     // Where `tap panel NAME` taps, "X Y" (empty for none): a script holds the toolbar's + there (editor.at.next).
     if let Some(name)=key.strip_prefix("at.") {
         out.clear();

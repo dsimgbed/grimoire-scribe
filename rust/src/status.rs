@@ -1,37 +1,18 @@
-//! status.rs: the clock and battery corner. A small indicator in one corner of a notebook page (settings.ini
-//! status_corner: the top left unless the owner picks another): the time (format_time_short, as the app
-//! writes times everywhere, or its 12-hour form with settings.ini clock_12h), a pixel art battery that
-//! shows the charge and, while it charges, a bolt, and the percent. A finger tap in a 14 mm square in that corner turns it on and off; the shortcut action
-//! `status-toggle` does the same, `status-corner` (and the Display sheet's row) moves it to the next
-//! corner, and the Display sheet sets its size (settings.ini status_on, status_corner, status_size;
-//! docs/FORMAT.md).
+//! status.rs: the notebook status bar. A two-row strip across the top of a notebook page: the notebook
+//! and page on the left, the time, battery and connection indicators on the right (settings.ini
+//! status_on and status_size; docs/FORMAT.md). The clock reads format_time_short, as the app writes
+//! times everywhere, or its 12-hour form with settings.ini clock_12h. The old floating clock corner is
+//! retired: the bar reserves a real strip, so nothing is ever drawn over the page.
 //!
 //! It shows on the notebook page itself and nowhere else: not on the Library, Settings, Share or Pen
 //! feel, and not while a sheet or menu is in front of the page (the Pages view, the Links bar, Find,
-//! Display, Paper, the tool picker and the keyboards). `wanted` is that rule; a tap works under it too:
-//! no other screen takes a tap in the corner for the clock.
+//! Display, Paper, the tool picker and the keyboards). `wanted` is that rule.
 //!
 //! Rust build only: the C tree has no such thing, so nothing here is a port.
 //!
-//! It is an overlay, like a toast and Live view's chip: app_flush paints it over a.screen just for
-//! the refresh and puts the pixels under it straight back, so it is never in a page, an export, a
-//! thumbnail, a Live view frame (live_push comes before it) or the sleep screen (app_sleep presents
-//! a.screen as it is). The screen guard leaves its rect out (display_skip_status).
-//!
-//! It refreshes itself at each minute and when the battery or charging changes: one small GL16 of
-//! its rect (and of what it covered, when it shrinks, moves or goes, each a refresh of its own: two
-//! corners are never one refresh across the screen), through display_present like every other
-//! refresh. No display waits of any kind. Nothing is sent while the pen is near, a stroke is in
-//! progress or the driver is in pen mode (a grayscale refresh would end that mode and wait for the
-//! pen's last frame, display_fbink.rs pen_leave): the corner waits for the pen to leave. A finger the
-//! touch panel lets through is never the pen's hand, so a tap clears a "near" the pen's leaving left
-//! behind: one tap is always one toggle, at once, with nothing to wait out.
-//!
-//! The toggle is decided at the finger's lift: down in the zone, on no control, lifted in the zone (or within
-//! 5 mm of where it landed) and up within 800 ms. The path between is not asked: a deliberate press flattens
-//! the fingertip and its centroid drifts, which lost the slow taps while light fast ones passed. Every
-//! decision (down, up) is one grimoire.log line. The setting is saved after the refresh went out,
-//! not before it (a save waits for the storage twice).
+//! The bar refreshes itself at each minute and when the battery or charging changes. Changes to the
+//! page, links or tool fields refresh only those cells through display_present. No display waits are
+//! sent while the pen is near, a stroke is in progress or the driver is in pen mode.
 
 use crate::prelude::*;
 use std::cell::RefCell;
@@ -54,6 +35,10 @@ const POLL_MS: u32 = 10000;
 const POLL_MS: u32 = 100;
 /// Text heights at 300 dpi for settings.ini status_size 0, 1 and 2: small, medium and large.
 const SIZE_PX: [f32; 3] = [30.0, 42.0, 56.0];
+/// The status bar's text sizes and heights at 300 dpi. Medium keeps the bar's original 104 px and
+/// 30 px text; small and large scale it without changing what each row says.
+const BAR_TEXT_PX: [f32; 3] = [26.0, 30.0, 36.0];
+const BAR_HEIGHT_PX: [f32; 3] = [88.0, 104.0, 124.0];
 /// How many sizes there are.
 pub const STATUS_SIZES: i32 = 3;
 /// How many corners there are: settings.ini status_corner 0 top left, 1 top right, 2 bottom right, 3 bottom left.
@@ -163,15 +148,23 @@ fn corner_box(corner: i32, w: i32, h: i32, bw: i32, bh: i32, m: i32) -> Rect {
     Rect { x: if right { w - m - bw } else { m }, y: if bottom { h - m - bh } else { m }, w: bw, h: bh }
 }
 
-/// The clock corner overlays the page; no status strip is reserved.
-pub fn status_reserved(_a: &App) -> i32 { 0 }
+/// The status bar reserves a real viewport strip at the top of the notebook page.
+pub fn status_reserved(a: &App) -> i32 {
+    if a.settings.status_on && a.scr == ScreenId::Editor && editor_page_canvas(a).is_some() {
+        let h = ui_px(BAR_HEIGHT_PX[clampi(a.settings.status_size, 0, STATUS_SIZES - 1) as usize]);
+        h.min(a.h / 3)
+    } else {
+        0
+    }
+}
 
 /// Compatibility for the retired status-mode action.
 pub fn status_cycle_mode(a: &mut App) { status_toggle(a); }
 
 fn bar_layout(a: &App, b: &Battery) -> Layout {
-    let mut l = layout_of(0, 0, a.w, a.h, sys_wall_clock(), a.settings.clock_12h, b);
-    let h = status_reserved(a);
+    let mut l = layout_metrics(bar_metrics(a.settings.status_size), 0, a.w, a.h, sys_wall_clock(), a.settings.clock_12h, b);
+    let reserved = status_reserved(a);
+    let h = if reserved > 0 { reserved } else { ui_px(BAR_HEIGHT_PX[clampi(a.settings.status_size, 0, STATUS_SIZES - 1) as usize]) };
     let pad = ui_px(16.0);
     let half = h / 2;
     let clock_w = l.rect.w + pad;
@@ -293,8 +286,7 @@ struct Metrics {
     ih: i32,
 }
 
-fn metrics(size: i32) -> Metrics {
-    let px = ui_px(SIZE_PX[clampi(size, 0, STATUS_SIZES - 1) as usize]) as f32;
+fn metrics_px(px: f32) -> Metrics {
     let face = FontFace::Fixed;
     let lh = font_ascent(face, px) + font_descent(face, px);
     let pady = (px * 0.3) as i32;
@@ -302,6 +294,14 @@ fn metrics(size: i32) -> Metrics {
     let unit = ((px / 9.5).round() as i32).max(2);
     let ih = ICON_UH * unit;
     Metrics { px, padx: (px * 0.5) as i32, bh: (lh + 2 * pady).max(ih + 2 * ui_px(3.0)), unit, ih }
+}
+
+fn metrics(size: i32) -> Metrics {
+    metrics_px(ui_px(SIZE_PX[clampi(size, 0, STATUS_SIZES - 1) as usize]) as f32)
+}
+
+fn bar_metrics(size: i32) -> Metrics {
+    metrics_px(ui_px(BAR_TEXT_PX[clampi(size, 0, STATUS_SIZES - 1) as usize]) as f32)
 }
 
 /// What the indicator says and where it sits.
@@ -338,7 +338,10 @@ pub fn battery_fill(percent: i32) -> i32 {
 /// art and then its percent, left to right in every corner. Its text is in the monospaced face every
 /// theme shares, so its box changes only with the number of characters.
 fn layout_of(size: i32, corner: i32, sw: i32, sh: i32, t: i64, twelve: bool, b: &Battery) -> Layout {
-    let m = metrics(size);
+    layout_metrics(metrics(size), corner, sw, sh, t, twelve, b)
+}
+
+fn layout_metrics(m: Metrics, corner: i32, sw: i32, sh: i32, t: i64, twelve: bool, b: &Battery) -> Layout {
     let mut time = String::new();
     if twelve {
         format_time_short_12h(t, &mut time, 64);
@@ -376,17 +379,13 @@ fn layout_of(size: i32, corner: i32, sw: i32, sh: i32, t: i64, twelve: bool, b: 
 /// whatever it says: its box starts at the margin and is as tall as layout_of makes it. Asked
 /// before a layout, which costs a clock, a format and a measure, so a refresh far away costs none.
 fn band(a: &App) -> Rect {
-    if status_reserved(a) > 0 { return Rect { x: 0, y: 0, w: a.w, h: status_reserved(a) }; }
-    let h = ui_px(6.0) + metrics(a.settings.status_size).bh;
-    let bottom = a.settings.status_corner == 2 || a.settings.status_corner == 3;
-    Rect { x: 0, y: if bottom { a.h - h } else { 0 }, w: a.w, h }
+    let h = status_reserved(a).max(ui_px(BAR_HEIGHT_PX[clampi(a.settings.status_size, 0, STATUS_SIZES - 1) as usize]));
+    Rect { x: 0, y: 0, w: a.w, h }
 }
 
 fn layout(a: &App) -> Layout {
     let b = with(|s| s.battery);
-    if status_reserved(a) > 0 { bar_layout(a, &b) } else {
-        layout_of(a.settings.status_size, a.settings.status_corner, a.w, a.h, sys_wall_clock(), a.settings.clock_12h, &b)
-    }
+    bar_layout(a, &b)
 }
 
 /// The battery in pixel art in r (ICON_UW by ICON_UH units of u px): an outline with notched corners, its
@@ -435,12 +434,12 @@ fn draw(c: &mut Canvas, l: &Layout) {
         for cell in &l.cells {
             let mut r = cell.rect;
             if cell.icon != IconKind::None {
-                let side = ui_px(36.0);
+                let side = (l.px * 1.2).round() as i32;
                 ui_icon(c, cell.icon, Rect { x: r.x, y: r.y + (r.h - side) / 2, w: side, h: side }, 0);
                 r.x += side + ui_px(6.0); r.w -= side + ui_px(10.0);
             }
             // ui_text shrinks/truncates at UTF-8 boundaries through the shared font renderer.
-            font_draw_left_name(c, FontFace::Regular, ui_px(30.0) as f32, r, &cell.text, 0);
+            font_draw_left_name(c, FontFace::Regular, l.px, r, &cell.text, 0);
         }
     } else {
     ui_frame(c, l.rect, ui_px(8.0), 255, true, 0);
@@ -481,33 +480,13 @@ pub fn status_preview(c: &mut Canvas, r: Rect, size: i32, corner: i32, twelve: b
     draw(c, &l);
 }
 
-/// The square a tap finds in the corner the setting names: 14 mm.
-pub fn status_square(a: &App) -> Rect {
-    let side = (ZONE_MM * a.dpi / 25.4).round() as i32;
-    corner_square(a.settings.status_corner, a.w, a.h, side)
-}
+/// The retired corner has no tap square; status_zone is the bar's own strip, which a card or
+/// keyboard docked at the top must stay below.
+pub fn status_square(_a: &App) -> Rect { RECT_EMPTY }
 
-/// The corner's zone: its square and where its box shows with the room a tap has around it, together (what
-/// a card or keyboard docked at the top keeps below, so it never meets the corner).
-pub fn status_zone(a: &App) -> Rect {
-    let pad = mm_to_px(PAD_MM, a.dpi).round() as i32;
-    let b = layout(a).rect;
-    let around = rect_intersect(Rect { x: b.x - pad, y: b.y - pad, w: b.w + 2 * pad, h: b.h + 2 * pad }, Rect { x: 0, y: 0, w: a.w, h: a.h });
-    rect_union(status_square(a), around)
-}
+pub fn status_zone(a: &App) -> Rect { layout(a).rect }
 
-/// Whether (x, y) is in the corner as a tap finds it: its square, the indicator's box while it is up, and
-/// where its box shows in the corner the setting names, with PAD_MM around it, up or not. (The owner's
-/// taps to bring it back went where it had been: the box is twice as wide as the square, and half of them
-/// fell outside it.) Separate places, never the box around them: a corner just moved leaves the old box
-/// on the panel until its refresh goes, and that must not make the screen between a tap's target.
-pub fn status_hit(a: &App, x: f32, y: f32) -> bool {
-    let (px, py) = (x as i32, y as i32);
-    let pad = mm_to_px(PAD_MM, a.dpi).round() as i32;
-    let b = layout(a).rect;
-    let around = rect_intersect(Rect { x: b.x - pad, y: b.y - pad, w: b.w + 2 * pad, h: b.h + 2 * pad }, Rect { x: 0, y: 0, w: a.w, h: a.h });
-    rect_contains(status_square(a), px, py) || rect_contains(around, px, py) || rect_contains(with(|s| s.drawn), px, py)
-}
+pub fn status_hit(_a: &App, _x: f32, _y: f32) -> bool { false }
 
 /// Whether the clock and battery may show on this screen now: the notebook's page is in front, with no sheet,
 /// menu, Pages view or keyboard over it. The only place it shows, and the only place a tap in the corner is
@@ -545,12 +524,8 @@ pub fn status_pen(ev: &InEvent) {
     }
 }
 
-/// Whether the touch event status_touch was given last was the lift of a corner tap, which turned the
-/// indicator on or off. app_event hands every touch to status_touch before the screen, so the screen
-/// that handles the same event asks here, and leaves that tap to the corner.
-pub fn status_tapped() -> bool {
-    with(|s| s.tapped)
-}
+/// The retired corner has no tap of its own.
+pub fn status_tapped() -> bool { false }
 
 /// Whether painting the corner must hold its refreshes back: the pen is near, a stroke or another
 /// gesture is in progress, or the driver is in pen mode.
@@ -565,67 +540,8 @@ fn status_taking_down(a: &App) -> bool {
     editor_busy(a) || display_pen_mode_on()
 }
 
-/// A finger's events, before the screen sees them (it sees them all as ever; the corner only
-/// watches): a tap in the zone with no control under it turns the indicator on or off. Only the page
-/// has the corner (page_in_front); a sheet opened under a finger takes the corner's tap with it. app_event
-/// calls it awake only.
-pub fn status_touch(a: &mut App, ev: &InEvent) {
-    with(|s| s.tapped = false);
-    if !page_in_front(a) {
-        with(|s| s.tap.cancel());
-        return;
-    }
-    let slop = mm_to_px(SLOP_MM, a.dpi);
-    match ev.type_ {
-        InType::TouchDown => {
-            // A finger the touch panel let through is not the writing hand: the pen is not near, whatever a
-            // pen leaving without a word left behind. (Asked before the screen handles the touch: what it
-            // does may change what is there.)
-            with(|s| s.pen_near = false);
-            let in_zone = status_hit(a, ev.x, ev.y);
-            let ctl = in_zone && editor_control_at(a, ev.x, ev.y);
-            if in_zone {
-                if ctl {
-                    qlog!("status: corner down at %d,%d is on a control: not the clock's", ev.x as i32, ev.y as i32);
-                } else {
-                    qlog!("status: corner down at %d,%d in the zone: armed", ev.x as i32, ev.y as i32);
-                }
-            }
-            with(|s| s.tap.down(in_zone && !ctl, ev.x, ev.y, ev.t_ms));
-        }
-        // (the path between the two ends is not asked)
-        InType::TouchMove => {}
-        InType::TouchUp if ev.value & TOUCH_F_CANCEL != 0 => {
-            if with(|s| s.tap.armed) {
-                qlog!("status: corner up: the touch was cancelled (a second finger, a palm or the pen): no toggle");
-            }
-            with(|s| s.tap.cancel())
-        }
-        InType::TouchUp => {
-            let in_zone = status_hit(a, ev.x, ev.y);
-            let armed = with(|s| s.tap.armed);
-            match with(|s| s.tap.up(ev.x, ev.y, ev.t_ms, in_zone, slop)) {
-                Ok(()) => {
-                    qlog!("status: corner up at %d,%d: toggled", ev.x as i32, ev.y as i32);
-                    status_toggle(a);
-                    with(|s| s.tapped = true);
-                }
-                Err(why) => {
-                    if armed {
-                        qlog!("status: corner up at %d,%d: no toggle, %s", ev.x as i32, ev.y as i32, why);
-                    }
-                }
-            }
-        }
-        InType::PinchBegin | InType::PinchMove | InType::PinchEnd => {
-            if with(|s| s.tap.armed) {
-                qlog!("status: corner tap dropped: a pinch began");
-            }
-            with(|s| s.tap.cancel())
-        }
-        _ => {}
-    }
-}
+/// The retired corner takes no touch events; the status bar is read-only.
+pub fn status_touch(_a: &mut App, _ev: &InEvent) {}
 
 fn read_battery() {
     let b = sys_battery();
@@ -676,68 +592,39 @@ fn save_later() {
     with(|s| s.save_due = true);
 }
 
-/// Turns the indicator on or off: a tap in the corner, or the status-toggle shortcut.
+/// Turns the status bar on or off (the status-toggle shortcut).
 pub fn status_toggle(a: &mut App) {
     a.settings.status_mode = 1;
     a.settings.status_on = !a.settings.status_on;
     save_later();
-    qlog!(
-        "status: the clock and battery corner is %s (size %d, corner %d)",
-        if a.settings.status_on { "on" } else { "off" },
-        a.settings.status_size,
-        a.settings.status_corner
-    );
+    qlog!("status: the notebook status bar is %s (size %d)", if a.settings.status_on { "on" } else { "off" }, a.settings.status_size);
     let front = page_in_front(a);
     if a.settings.status_on && front && !status_busy(a) {
-        read_battery(); // (so its first drawing has the percent; else the next tick reads it)
+        read_battery();
     }
     ask_change(a);
+    crate::editor::editor_status_changed(a);
     if !front {
         if a.settings.status_on {
-            // TRANSLATORS: a toast (about 1700 px at 44 px in bold, or two lines): the clock and battery were turned
-            // on with a shortcut where no notebook page is in front; they show on a page only.
-            say(a, tr("Clock and battery on (shown on notebook pages)."));
+            // TRANSLATORS: a toast: the notebook status bar was turned on with a shortcut where no page is in front.
+            say(a, tr("Status bar on (shown on notebook pages)."));
         } else {
-            // TRANSLATORS: a toast: the clock and battery were turned off with a shortcut.
-            say(a, tr("Clock and battery off."));
+            // TRANSLATORS: a toast: the notebook status bar was turned off with a shortcut.
+            say(a, tr("Status bar off."));
         }
     }
 }
 
-/// Settings > Sleep & Clock > Clock settings > the size row: the next size, small to medium to large and round.
+/// Settings > Sleep & Clock > Status bar > Size: the next size, small to medium to large and round.
 pub fn status_cycle_size(a: &mut App) {
     a.settings.status_size = (a.settings.status_size + 1) % STATUS_SIZES;
     save_later();
     ask_change(a);
+    crate::editor::editor_status_changed(a);
 }
 
-/// The corner's name for a toast, one sentence for each (settings.ini status_corner 0, 1, 2, 3).
-static K_CORNER_TOASTS: [&str; STATUS_CORNERS as usize] = [
-    // TRANSLATORS: a toast (about 1700 px at 44 px in bold, or two lines) when the status-corner shortcut moves the
-    // clock and battery where no notebook page is in front: which corner of the page they sit in now.
-    n_("Clock and battery: top left corner of page"),
-    n_("Clock and battery: top right corner of page"),
-    n_("Clock and battery: bottom right corner of page"),
-    n_("Clock and battery: bottom left corner of page"),
-];
-
-/// Settings > Sleep & Clock > Clock settings > the corner row: the next corner, clockwise from the top left and
-/// round. No toast: the row names the corner, as the size row names the size (issue #141).
-pub fn status_cycle_corner(a: &mut App) {
-    a.settings.status_corner = (a.settings.status_corner + 1) % STATUS_CORNERS;
-    save_later();
-    qlog!("status: the clock and battery corner moves to corner %d", a.settings.status_corner);
-    ask_change(a);
-}
-
-/// The status-corner shortcut: the next corner, as the corner row; with no notebook page in front, where nothing
-/// shows it, a toast says which corner it is now.
-pub fn status_corner_shortcut(a: &mut App) {
-    status_cycle_corner(a);
-    if !page_in_front(a) {
-        say(a, tr(K_CORNER_TOASTS[clampi(a.settings.status_corner, 0, STATUS_CORNERS - 1) as usize]));
-    }
-}
+/// The retired status-corner shortcut does nothing; the bar always runs across the top.
+pub fn status_corner_shortcut(_a: &mut App) {}
 
 /// The Kindle went to sleep or woke: the panel is the sleep screen's or about to be drawn whole,
 /// and the pen's leaving may have gone unseen meanwhile.
@@ -1011,7 +898,7 @@ pub fn status_probe(a: &App, key: &str, out: &mut String, cap: usize) -> i32 {
                 "0"
             }
         ),
-        "zone" => rect_text(out, status_square(a), true),
+        "zone" => rect_text(out, RECT_EMPTY, false),
         "front" => csnprintf!(out, cap, "%d", page_in_front(a) as i32),
         _ => return -1,
     };
@@ -1366,55 +1253,18 @@ mod tests {
     }
 
     #[test]
-    fn the_band_holds_the_box_of_each_corner() {
-        utc();
-        up();
-        let mut a = App { w: 1860, h: 2480, dpi: 300.0, ..Default::default() };
-        a.settings.status_mode = 1;
-        let b = Battery { percent: 87, charging: true };
-        for size in 0..STATUS_SIZES {
-            for corner in 0..STATUS_CORNERS {
-                a.settings.status_size = size;
-                a.settings.status_corner = corner;
-                let l = layout_of(size, corner, a.w, a.h, 1700000000, false, &b);
-                assert!(rect_contains_rect(band(&a), l.rect), "size {size} corner {corner}: {:?} in {:?}", l.rect, band(&a));
-                assert_eq!(band(&a).h, ui_px(6.0) + l.rect.h);
-            }
-        }
-    }
-
-    #[test]
-    fn the_zone_is_fourteen_millimetres_in_the_corner_and_takes_the_indicator() {
+    fn the_retired_corner_has_no_tap_zone() {
         utc();
         up();
         status_reset();
         let mut a = App { w: 1860, h: 2480, dpi: 300.0, ..Default::default() };
         a.settings.status_mode = 1;
-        assert_eq!(status_square(&a), Rect { x: 0, y: 0, w: 165, h: 165 });
-        a.dpi = 150.0;
-        assert_eq!(status_square(&a).w, 83);
-        a.dpi = 300.0;
-        // it follows the corner
+        assert!(rect_is_empty(status_square(&a)));
+        assert!(!status_hit(&a, 70.0, 70.0));
         a.settings.status_corner = 2;
-        assert_eq!(status_square(&a), Rect { x: 1695, y: 2315, w: 165, h: 165 });
-        assert!(status_hit(&a, 1850.0, 2470.0) && !status_hit(&a, 70.0, 70.0) && !status_hit(&a, 1200.0, 2470.0));
-        // off, where its box would show (twice as wide as the square) and 4 mm around it, a tap finds it
-        let w = layout(&a).rect;
-        assert!(rect_is_empty(with(|s| s.drawn)) && w.w > 165);
-        assert!(status_hit(&a, (w.x + 10) as f32, (w.y + w.h / 2) as f32) && status_hit(&a, (w.x - 40) as f32, (w.y + 5) as f32));
-        assert!(!status_hit(&a, (w.x - 60) as f32, (w.y + 5) as f32) && !status_hit(&a, (w.x + 10) as f32, (w.y - 60) as f32));
-        // while the indicator is up, its box is part of the corner: the box and the square, not the screen between
-        a.settings.status_corner = 0;
-        let l = layout_of(2, 0, a.w, a.h, 1700000000, false, &Battery { percent: 87, charging: true });
-        set_drawn(Some(&l));
-        assert!(status_hit(&a, 70.0, 70.0) && status_hit(&a, (l.rect.x + l.rect.w - 5) as f32, 30.0));
-        assert!(!status_hit(&a, (l.rect.x + l.rect.w + 20) as f32, 30.0) && !status_hit(&a, 400.0, 400.0));
-        // the corner moved, the old box still on the panel until its refresh: both places take the tap, nothing between
-        a.settings.status_corner = 2;
-        assert!(status_hit(&a, 1850.0, 2470.0) && status_hit(&a, 100.0, 30.0));
-        assert!(!status_hit(&a, 900.0, 1200.0) && !status_hit(&a, 1700.0, 100.0));
+        assert!(rect_is_empty(status_square(&a)));
+        assert!(!status_hit(&a, 1850.0, 2470.0));
         status_reset();
-        assert!(!status_hit(&a, 100.0, 30.0));
     }
 
     #[test]
@@ -1431,7 +1281,7 @@ mod tests {
             assert_eq!(out, "", "{k}");
         }
         status_probe(&a, "zone", &mut out, 64);
-        assert_eq!(out, "0 0 165 165");
+        assert_eq!(out, "");
         status_probe(&a, "front", &mut out, 64);
         assert_eq!(out, "0", "no notebook page in front");
         let l = layout_of(0, 0, 1860, 2480, 1700000000, false, &Battery { percent: 9, charging: true });
@@ -1619,15 +1469,6 @@ mod tests {
         // a refresh elsewhere does not touch it
         let mut far = Rect { x: 300, y: 300, w: 50, h: 50 };
         assert!(status_cover(&mut a, &mut far).is_none() && far == Rect { x: 300, y: 300, w: 50, h: 50 });
-        // in a bottom corner it is painted there, and the top's old place goes with its own refresh when
-        // the refresh does not reach it
-        a.settings.status_corner = 3;
-        let old = with(|s| s.drawn);
-        let mut low = Rect { x: 0, y: 300, w: 600, h: 100 };
-        let c = status_cover(&mut a, &mut low).expect("covered in the bottom corner");
-        assert!(rect_contains_rect(low, c.rect) && c.rect.y > 300 && c.rect.x < 100);
-        assert!(with(|s| s.pending.contains(&old)), "the old place is asked a refresh of its own");
-        status_uncover(&mut a, c);
         // off, or the page not in front: it is not painted at all
         a.settings.status_on = false;
         let mut dirty = Rect { x: 0, y: 0, w: 600, h: 400 };
@@ -1668,30 +1509,14 @@ mod tests {
         status_reset();
     }
 
-    /// With the page covered (Settings over it), the Clock settings page's corner row moves the corner with no
-    /// toast, and the status-corner shortcut moves it and names the new corner in one (issue #141).
+    /// The retired corner shortcut no longer moves anything: the bar is always across the top.
     #[test]
-    fn the_corner_row_moves_the_corner_without_a_toast_and_the_shortcut_names_it() {
-        up();
+    fn the_retired_corner_shortcut_does_nothing() {
         status_reset();
-        front(false);
         let mut a = App { w: 600, h: 400, dpi: 300.0, ..Default::default() };
-        a.settings.status_mode = 1;
-        assert_eq!(canvas_init(&mut a.screen, 600, 400), 0);
-        status_cycle_corner(&mut a);
-        assert_eq!((a.settings.status_corner, a.toast_visible, a.toast.as_str()), (1, false, ""));
+        a.settings.status_corner = 1;
         status_corner_shortcut(&mut a);
-        assert_eq!(a.settings.status_corner, 2);
-        assert!(a.toast_visible);
-        assert_eq!(a.toast.as_str(), "Clock and battery: bottom right corner of page");
-        // with the page in front the shortcut shows the corner itself, and no toast
-        front(true);
-        a.toast_visible = false;
-        a.toast.set_cut("");
-        status_corner_shortcut(&mut a);
-        assert_eq!((a.settings.status_corner, a.toast_visible, a.toast.as_str()), (3, false, ""));
-        front(false);
-        with(|s| s.save_due = false);
+        assert_eq!(a.settings.status_corner, 1);
         status_reset();
     }
 }
