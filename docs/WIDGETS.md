@@ -429,6 +429,9 @@ have them. The fixtures and scenarios under `tests/` are the working examples:
   that declares no capability, one a command past a pass's limit, one whose file is not the one
   installed, one resized to the smallest frame, and one whose id is 128 bytes long.
   `z_widget_host_kept.qs` starts Grimoire again on that data and finds the last one's frame.
+- `tests/fixtures/widgetruns/` holds the packages whose modules run for long, written the same way,
+  and `tests/scenarios/z_widget_runs.qs` opens them with app time on the script's clock: one whose
+  drawing pass never ends, which is stopped when its instruction budget is used up.
 - `rust/tests/test_widget_host.rs` holds the same rules as unit tests of the host, pixel by pixel
   and limit by limit.
 

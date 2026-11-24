@@ -1,11 +1,12 @@
 // widgetfix: the WebAssembly modules the widget host's tests and scenarios run, written here byte by byte (no
 // compiler, no file from anywhere else), and the installed packages the scenarios copy
-// (tests/fixtures/widgethost/: `make widget-fixtures` writes them; test_widget_fixtures.rs checks the
-// committed bytes are what this makes now).
+// (tests/fixtures/widgethost/ and tests/fixtures/widgetruns/: `make widget-fixtures` writes them;
+// test_widget_fixtures.rs checks the committed bytes are what this makes now).
 //
-// Every module here imports the ten functions of the `grimoire` ABI (docs/WIDGETS.md), exports one page of
-// memory, `widget_draw` and `widget_tap`, and each of the two is a straight line of the steps it is given
-// (`Op`): constants pushed, imports called. That is enough to pass the host any numbers.
+// Every module here imports the ten functions of the `grimoire` ABI (docs/WIDGETS.md) and exports its memory,
+// `widget_draw` and `widget_tap`. In most, each of the two is a straight line of the steps it is given (`Op`):
+// constants pushed, imports called (`module`). That is enough to pass the host any numbers. The ones that
+// loop, or have more than one page of one memory, are written from the bytes of their bodies (`Wasm`).
 #![allow(dead_code)]
 
 use grimoire::sha256::sha256_of;
@@ -80,8 +81,9 @@ fn section(out: &mut Vec<u8>, id: u8, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-fn body(ops: &[Op]) -> Vec<u8> {
-    let mut code = vec![0u8]; // no locals
+/// The steps as a function body's bytes, with no locals named before them and no end after them.
+pub fn code(ops: &[Op]) -> Vec<u8> {
+    let mut code = Vec::new();
     for op in ops {
         match op {
             Op::I(v) => {
@@ -102,6 +104,12 @@ fn body(ops: &[Op]) -> Vec<u8> {
             Op::Store8 => code.extend_from_slice(&[0x3a, 0x00, 0x00]),
         }
     }
+    code
+}
+
+fn body(ops: &[Op]) -> Vec<u8> {
+    let mut code = vec![0u8]; // no locals
+    code.extend(self::code(ops));
     code.push(0x0b);
     let mut out = Vec::new();
     uleb(&mut out, code.len() as u32);
@@ -164,6 +172,163 @@ pub fn module(draw: &[Op], tap: &[Op], data: &[(u32, &[u8])]) -> Vec<u8> {
     out
 }
 
+// ---- modules with more than a straight line: loops, several memories, tables, a start function ----
+
+/// The local every function of a `Wasm` module counts its loops in (each function there has four i32 locals
+/// after its parameters; this index is one of them in `widget_draw` and in `widget_tap`).
+pub const COUNTER: u32 = 3;
+
+/// `body`, again and again with no way out: a loop that branches back to its start.
+pub fn forever(body: &[u8]) -> Vec<u8> {
+    let mut o = vec![0x03, 0x40];
+    o.extend_from_slice(body);
+    o.extend_from_slice(&[0x0c, 0x00, 0x0b]);
+    o
+}
+
+/// `body`, `n` times, counted in the local COUNTER (which `body` may read: it runs from 0).
+pub fn repeat(n: i32, body: &[u8]) -> Vec<u8> {
+    let mut o = code(&[Op::I(0)]);
+    o.push(0x21);
+    uleb(&mut o, COUNTER);
+    o.extend_from_slice(&[0x03, 0x40]);
+    o.extend_from_slice(body);
+    o.push(0x20);
+    uleb(&mut o, COUNTER);
+    o.extend(code(&[Op::I(1), Op::Add]));
+    o.push(0x22);
+    uleb(&mut o, COUNTER);
+    o.extend(code(&[Op::I(n)]));
+    // i32.lt_u, br_if 0, end
+    o.extend_from_slice(&[0x49, 0x0d, 0x00, 0x0b]);
+    o
+}
+
+/// local.get COUNTER, for a `repeat` body that draws by its turn.
+pub fn counter() -> Vec<u8> {
+    let mut o = vec![0x20];
+    uleb(&mut o, COUNTER);
+    o
+}
+
+/// A module given as the bytes of its functions' bodies, with any number of memories and tables (pages or
+/// entries at the start, and the most each may grow to), a start function and functions beside the two exports.
+/// It imports and exports what `module`'s do; the memory exported is the first.
+pub struct Wasm {
+    pub memories: Vec<(u32, Option<u32>)>,
+    pub tables: Vec<(u32, Option<u32>)>,
+    pub draw: Vec<u8>,
+    pub tap: Vec<u8>,
+    /// runs when the module is instantiated
+    pub start: Option<Vec<u8>>,
+    /// functions with no parameter and no result, from index FIRST_EXTRA
+    pub extra: Vec<Vec<u8>>,
+    pub data: Vec<(u32, Vec<u8>)>,
+}
+
+/// The index of a `Wasm` module's first function beside `widget_draw` and `widget_tap`.
+pub const FIRST_EXTRA: u32 = IMPORTS.len() as u32 + 2;
+
+impl Wasm {
+    /// A module of one page of memory whose `widget_draw` is `draw` and whose `widget_tap` does nothing.
+    pub fn new(draw: Vec<u8>) -> Wasm {
+        Wasm { memories: vec![(1, None)], tables: Vec::new(), draw, tap: Vec::new(), start: None, extra: Vec::new(), data: Vec::new() }
+    }
+
+    pub fn bytes(&self) -> Vec<u8> {
+        fn limits(s: &mut Vec<u8>, (min, max): (u32, Option<u32>)) {
+            s.push(max.is_some() as u8);
+            uleb(s, min);
+            if let Some(max) = max {
+                uleb(s, max);
+            }
+        }
+        let mut out = b"\0asm\x01\0\0\0".to_vec();
+        let mut s = Vec::new();
+        // (the types of `module`, and one more: no parameter, no result)
+        const TYPE_PLAIN: u8 = TYPES.len() as u8;
+        uleb(&mut s, TYPES.len() as u32 + 1);
+        for (params, result) in TYPES.into_iter().chain([(0, 0)]) {
+            s.push(0x60);
+            uleb(&mut s, params as u32);
+            s.extend(std::iter::repeat_n(0x7f, params));
+            if result == 0 {
+                s.push(0);
+            } else {
+                s.extend_from_slice(&[1, result]);
+            }
+        }
+        section(&mut out, 1, &s);
+        s.clear();
+        uleb(&mut s, IMPORTS.len() as u32);
+        for (import, ty) in IMPORTS {
+            name(&mut s, "grimoire");
+            name(&mut s, import);
+            s.extend_from_slice(&[0x00, ty]);
+        }
+        section(&mut out, 2, &s);
+        let mut funcs: Vec<(u8, &[u8])> = vec![(TYPE_DRAW, &self.draw), (TYPE_TAP, &self.tap)];
+        funcs.extend(self.extra.iter().map(|e| (TYPE_PLAIN, &e[..])));
+        funcs.extend(self.start.iter().map(|e| (TYPE_PLAIN, &e[..])));
+        s.clear();
+        uleb(&mut s, funcs.len() as u32);
+        s.extend(funcs.iter().map(|(ty, _)| *ty));
+        section(&mut out, 3, &s);
+        if !self.tables.is_empty() {
+            s.clear();
+            uleb(&mut s, self.tables.len() as u32);
+            for t in &self.tables {
+                s.push(0x70); // funcref
+                limits(&mut s, *t);
+            }
+            section(&mut out, 4, &s);
+        }
+        s.clear();
+        uleb(&mut s, self.memories.len() as u32);
+        for m in &self.memories {
+            limits(&mut s, *m);
+        }
+        section(&mut out, 5, &s);
+        s.clear();
+        s.push(3);
+        name(&mut s, "memory");
+        s.extend_from_slice(&[0x02, 0]);
+        name(&mut s, "widget_draw");
+        s.extend_from_slice(&[0x00, IMPORTS.len() as u8]);
+        name(&mut s, "widget_tap");
+        s.extend_from_slice(&[0x00, IMPORTS.len() as u8 + 1]);
+        section(&mut out, 7, &s);
+        if self.start.is_some() {
+            s.clear();
+            uleb(&mut s, IMPORTS.len() as u32 + funcs.len() as u32 - 1);
+            section(&mut out, 8, &s);
+        }
+        s.clear();
+        uleb(&mut s, funcs.len() as u32);
+        for (_, code) in &funcs {
+            let mut b = vec![1, 4, 0x7f]; // four i32 locals
+            b.extend_from_slice(code);
+            b.push(0x0b);
+            uleb(&mut s, b.len() as u32);
+            s.extend_from_slice(&b);
+        }
+        section(&mut out, 10, &s);
+        if !self.data.is_empty() {
+            s.clear();
+            uleb(&mut s, self.data.len() as u32);
+            for (at, bytes) in &self.data {
+                s.extend_from_slice(&[0x00, 0x41]);
+                sleb(&mut s, *at as i32);
+                s.push(0x0b);
+                uleb(&mut s, bytes.len() as u32);
+                s.extend_from_slice(bytes);
+            }
+            section(&mut out, 11, &s);
+        }
+        out
+    }
+}
+
 pub fn call(import: &'static str, args: &[i32]) -> Vec<Op> {
     let mut v: Vec<Op> = args.iter().map(|&a| Op::I(a)).collect();
     v.push(Op::Call(import));
@@ -219,6 +384,8 @@ pub fn manifest(id: &str, name: &str, capabilities: &[&str], size: &str, artifac
 pub const FIXED_400_300: &str = "    mode: fixed\n    default: [400, 300]\n";
 /// A resizable frame whose manifest asks for a smallest height under the smallest frame's (120).
 pub const SMALLEST_120_80: &str = "    mode: resizable\n    default: [220, 160]\n    min: [120, 80]\n    max: [400, 300]\n";
+/// A manifest that names no size: the frame is the default one, 220x160, and does not resize.
+pub const UNSIZED: &str = "    mode: fixed\n";
 pub const BOTH: [&str; 2] = ["editor:overlay", "storage:widget-local"];
 
 /// A package of the scenarios' data root: its id, name, manifest and module, and the SHA-256 its index entry
@@ -295,11 +462,29 @@ pub fn packages() -> Vec<Package> {
     ]
 }
 
-/// tests/fixtures/widgethost: an installed data root's `packages` folder, each file's path and bytes.
-pub fn scenario_files() -> Vec<(String, Vec<u8>)> {
+/// A module whose drawing pass never ends: a loop with no way out.
+pub fn loops() -> Vec<u8> {
+    Wasm::new(forever(&[])).bytes()
+}
+
+/// The packages of tests/fixtures/widgetruns, in the order of its index: modules that run for long.
+pub fn packages_that_run() -> Vec<Package> {
+    vec![
+        // (its drawing pass never ends; its manifest names no size, so its frame is the default one, 220x160)
+        package("test.runs.loop", "Loop", &BOTH, UNSIZED, loops()),
+    ]
+}
+
+/// The data roots the scenarios copy: each a folder of tests/fixtures, with the packages installed in it.
+pub fn roots() -> Vec<(&'static str, Vec<Package>)> {
+    vec![("widgethost", packages()), ("widgetruns", packages_that_run())]
+}
+
+/// An installed data root's `packages` folder with these packages in it, each file's path and bytes.
+pub fn scenario_files(packages: &[Package]) -> Vec<(String, Vec<u8>)> {
     let mut files = Vec::new();
     let mut index = String::from("{\n  \"version\": 1,\n  \"packages\": [");
-    for (i, p) in packages().iter().enumerate() {
+    for (i, p) in packages.iter().enumerate() {
         let dir = format!("packages/widgets/{}", p.id);
         index.push_str(if i > 0 { ",\n    " } else { "\n    " });
         index.push_str(&format!(

@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "packages": [
+    {"id":"test.runs.loop","name":"Loop","version":"1.0.0","author":"Grimoire tests","description":"A module of the widget host's tests.","icon":"","path":"packages/widgets/test.runs.loop/module.bin","sha":"83f9277b45596de3d581c0714cc0216982a3fcbeec6b79375be99d51e02d9aec","installed_at":1,"source_url":""}
+  ]
+}

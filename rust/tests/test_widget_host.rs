@@ -238,9 +238,57 @@ fn a_package_without_the_overlay_capability_draws_nothing() {
 }
 
 /// What a frame says once a drawing pass of its module used up its instructions: the host's words, then the
-/// interpreter's for its out-of-fuel trap. (No test here runs a module that long: the interpreter's dispatch in
-/// an unoptimized build, as the tests are, uses native stack for every instruction it runs.)
+/// interpreter's for its out-of-fuel trap.
 const STOPPED: &str = "The widget stopped: all fuel consumed by WebAssembly";
+
+#[test]
+fn a_module_that_loops_for_ever_stops_when_its_instructions_are_used_up() {
+    let root = fresh_root("loops");
+    let before = patterned(700, 600);
+    // A drawing pass that never ends: the call is ended when its instructions are used up, the frame says so,
+    // nothing is drawn and the module is not called again.
+    let mut rt = installed("test.loop.draw", &BOTH, &Wasm::new(forever(&[])).bytes());
+    let mut c = before.clone();
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), Some(STOPPED));
+    assert_eq!(changed_outside(&before, &c, RECT_EMPTY), 0);
+    rt.draw(&mut c, BODY);
+    rt.tap(4, 4);
+    assert_eq!(rt.error(), Some(STOPPED));
+    // The same for a loop that draws on every turn (it ends by a limit of the pass or by its instructions,
+    // whichever comes first, with the same words), and for a tap that never ends.
+    let mut rt = installed("test.loop.rects", &BOTH, &Wasm::new(forever(&code(&rect(0, 0, 8, 8, 0)))).bytes());
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), Some(STOPPED));
+    let mut tapped = Wasm::new(code(&rect(0, 0, 8, 8, 0)));
+    tapped.tap = forever(&[]);
+    let mut rt = installed("test.loop.tap", &BOTH, &tapped.bytes());
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), None);
+    rt.tap(4, 4);
+    assert_eq!(rt.error(), Some("The widget stopped while handling a tap."));
+    // A start function that never ends: the module does not start, and the frame says why.
+    let mut starts = Wasm::new(Vec::new());
+    starts.start = Some(forever(&[]));
+    let m = manifest("test.loop.start", "Test", &BOTH, FIXED_400_300, &starts.bytes());
+    widget_package_install(&m, &starts.bytes(), "", 1860, 2480).unwrap();
+    assert_eq!(WidgetRuntime::new("test.loop.start").err().as_deref(), Some("The widget could not start: all fuel consumed by WebAssembly"));
+    // A function that calls itself for ever ends too: the interpreter's own call stack has a depth.
+    let mut deep = Wasm::new(vec![0x10, FIRST_EXTRA as u8]);
+    deep.extra = vec![vec![0x10, FIRST_EXTRA as u8]];
+    let mut rt = installed("test.loop.deep", &BOTH, &deep.bytes());
+    rt.draw(&mut c, BODY);
+    assert!(rt.error().is_some_and(|e| e.starts_with("The widget stopped: ")), "{:?}", rt.error());
+    // A long call that does end runs to its end: 20,000 calls of an import in a row, and a loop of 200,000 turns.
+    let line: Vec<Op> = (0..20_000).flat_map(|_| [Op::Call("now"), Op::Drop]).collect();
+    let mut rt = installed("test.loop.line", &BOTH, &draws(&line));
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), None);
+    let mut rt = installed("test.loop.turns", &BOTH, &Wasm::new([repeat(200_000, &[]), code(&rect(0, 0, 8, 8, 0))].concat()).bytes());
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), None);
+    let _ = std::fs::remove_dir_all(&root);
+}
 
 #[test]
 fn a_pass_at_a_limit_runs_and_one_past_it_stops_as_out_of_instructions() {
