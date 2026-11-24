@@ -959,35 +959,41 @@ fn zotero_card_area(s: &EditorState, pid: u32, short_cite: &str, quote: &str) ->
     let (margin_x, margin_y) = (240.min(s.pgw / 4), 160.min(s.pgh / 8));
     let (w, h) = if quote.is_empty() {
         let label = format!("Z  {}", short_cite);
-        let text_w = crate::font::font_measure(crate::font::FontFace::Bold, 24.0, &label);
-        let w = (text_w + 56).clamp(220, 760.min(s.pgw - margin_x - 40));
-        let h = 68;
+        let text_w = crate::font::font_measure(crate::font::FontFace::Bold, 36.0, &label);
+        let w = (text_w + 64).clamp(260, 860.min(s.pgw - margin_x - 60));
+        let h = 84;
         (w, h)
     } else {
         let mut w = ((s.pgw as f32) * 0.55).round() as i32;
-        w = w.clamp(360, (s.pgw - margin_x - 60).max(360));
-        let inner_w = (w - 44).max(100);
-        let lines = crate::font::font_wrap_lines(crate::font::FontFace::Regular, 28.0, quote, inner_w, None).max(1);
-        let needed_h = 18 + lines * 34 + 12 + 28 + 18;
+        w = w.clamp(480, (s.pgw - margin_x - 80).max(480));
+        let inner_w = (w - 58).max(120);
+        let lines = crate::font::font_wrap_lines(crate::font::FontFace::Regular, 40.0, quote, inner_w, None).max(1);
+        let lh = (crate::font::font_ascent(crate::font::FontFace::Regular, 40.0)
+            + crate::font::font_descent(crate::font::FontFace::Regular, 40.0))
+        .max(44);
+        let needed_h = 22 + lines * lh + 18 + 44 + 18;
         let cap_h = ((s.pgh as f32) * 0.38).round() as i32;
-        let h = needed_h.clamp(100, cap_h);
+        let h = needed_h.clamp(140, cap_h);
         (w, h)
     };
 
     let existing: Vec<Rect> = crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).iter().map(|z| z.area).collect();
-    let gap = 16;
+    let gap = 20;
     let mut x = margin_x;
     let mut y = margin_y;
-    for r in &existing {
-        if rect_overlaps(Rect::new(x, y, w, h), rect_inflate(*r, gap)) {
-            y = r.y + r.h + gap;
-            if y + h > s.pgh - 80 {
-                x = r.x + r.w + gap;
-                y = margin_y;
-                if x + w > s.pgw - 40 {
-                    x = margin_x;
-                    y = margin_y + 40;
-                }
+    for _ in 0..32 {
+        let cand = Rect::new(x, y, w, h);
+        let Some(hit) = existing.iter().find(|r| rect_overlaps(cand, rect_inflate(**r, gap))) else {
+            break;
+        };
+        y = hit.y + hit.h + gap;
+        if y + h > s.pgh - 80 {
+            x = hit.x + hit.w + gap;
+            y = margin_y;
+            if x + w > s.pgw - 40 {
+                x = margin_x;
+                y = margin_y + 40;
+                break;
             }
         }
     }
@@ -1021,7 +1027,16 @@ pub(crate) fn zotero_add_row(a: &mut App, row: &ZoteroSheetRow, consume: bool) -
         return false;
     }
     let area = zotero_card_area(s, pid, &row.label, &row.quote);
-    let seed = crate::zotero_bridge::zotero_seed(pid, row.item_key.as_str());
+    let mut seed = crate::zotero_bridge::zotero_seed(pid, row.item_key.as_str());
+    let existing = crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid);
+    // Replace a bare catalog placeholder (page==0, no quote) for the same item; otherwise mint a
+    // unique seed so multiple passages or pages from the same source stay side-by-side on the page.
+    let replaces_placeholder = existing.iter().any(|l| l.seed == seed && l.page == 0 && l.quote.is_empty());
+    if !replaces_placeholder {
+        while existing.iter().any(|l| l.seed == seed) {
+            seed = (seed.wrapping_add(1)) | 0x8000_0000;
+        }
+    }
     let zref = Zref {
         pid,
         seed,
@@ -1186,8 +1201,8 @@ pub(crate) fn zotero_single_card_draw(a: &mut App, z: &Zref, area_override: Opti
     canvas_set_clip(&mut a.screen, card_clip);
 
     let z_scale = if page_area.w > 0 { sr.w as f32 / page_area.w as f32 } else { s_zoom };
-    let r_radius = (8.0 * z_scale).round().max(2.0) as i32;
-    let border_thick = (2.0 * z_scale).round().max(1.0) as i32;
+    let r_radius = (10.0 * z_scale).round().max(2.0) as i32;
+    let border_thick = (3.0 * z_scale).round().max(1.0) as i32;
 
     // clean white card
     ui_frame(&mut a.screen, sr, r_radius, 255, true, 0);
@@ -1195,34 +1210,40 @@ pub(crate) fn zotero_single_card_draw(a: &mut App, z: &Zref, area_override: Opti
     ui_frame(&mut a.screen, sr, r_radius, 0, false, border_thick);
 
     if !z.quote.is_empty() {
-        let bar_w = (6.0 * z_scale).round().max(2.0) as i32;
+        let bar_w = (10.0 * z_scale).round().max(3.0) as i32;
         let bar = Rect { x: sr.x, y: sr.y, w: bar_w, h: sr.h };
         canvas_fill(&mut a.screen, bar, 0);
 
-        let pad_left = bar_w + (14.0 * z_scale).round().max(6.0) as i32;
-        let pad_right = (14.0 * z_scale).round().max(6.0) as i32;
-        let pad_top = (10.0 * z_scale).round().max(4.0) as i32;
-        let footer_h = (26.0 * z_scale).round().max(14.0) as i32;
-        let inner_w = (sr.w - pad_left - pad_right).max(10);
-        let inner_h = (sr.h - pad_top - footer_h - (10.0 * z_scale) as i32).max(10);
+        let pad_left = bar_w + (24.0 * z_scale).round().max(8.0) as i32;
+        let pad_right = (24.0 * z_scale).round().max(8.0) as i32;
+        let pad_top = (18.0 * z_scale).round().max(6.0) as i32;
+        let footer_h = (44.0 * z_scale).round().max(18.0) as i32;
+        let gap_y = (14.0 * z_scale).round().max(4.0) as i32;
+        let pad_bot = (12.0 * z_scale).round().max(4.0) as i32;
+        let inner_w = (sr.w - pad_left - pad_right).max(16);
+        let inner_h = (sr.h - pad_top - footer_h - gap_y - pad_bot).max(16);
 
-        let font_size = (24.0 * z_scale).clamp(8.0, 32.0);
-        let line_h = (32.0 * z_scale).round().max(12.0) as i32;
-        let max_lines = (inner_h / line_h).max(1);
+        let font_size = (40.0 * z_scale).clamp(12.0, 56.0);
+        let lh = (crate::font::font_ascent(crate::font::FontFace::Regular, font_size)
+            + crate::font::font_descent(crate::font::FontFace::Regular, font_size))
+        .max((44.0 * z_scale).round().max(14.0) as i32);
+        let max_lines = (inner_h / lh).max(1);
 
         let quote_rect = Rect { x: sr.x + pad_left, y: sr.y + pad_top, w: inner_w, h: inner_h };
         crate::font::font_draw_wrapped_name(&mut a.screen, crate::font::FontFace::Regular, font_size, quote_rect, &z.quote, max_lines, 0);
 
-        let footer_rect = Rect { x: sr.x + pad_left, y: sr.y + sr.h - footer_h - (6.0 * z_scale) as i32, w: inner_w, h: footer_h };
+        let footer_rect = Rect { x: sr.x + pad_left, y: sr.y + sr.h - footer_h - pad_bot, w: inner_w, h: footer_h };
         let footer_text = format!("Z  {}", z.short_cite);
-        let footer_font = (18.0 * z_scale).clamp(8.0, 24.0);
-        crate::ui::ui_text_name(&mut a.screen, crate::font::FontFace::Bold, footer_font, (footer_font * 0.7).max(8.0), footer_rect, &footer_text, 1, 0);
+        let footer_font = (32.0 * z_scale).clamp(10.0, 42.0);
+        crate::ui::ui_text_name(&mut a.screen, crate::font::FontFace::Bold, footer_font, (footer_font * 0.65).max(10.0), footer_rect, &footer_text, 1, 80);
+    } else if page_area.w <= 96 {
+        ui_button(&mut a.screen, sr, IconKind::None, "Z", ButtonStyle::Plain);
     } else {
-        let pad_x = (20.0 * z_scale).round().max(8.0) as i32;
-        let inner = Rect { x: sr.x + pad_x, y: sr.y, w: (sr.w - 2 * pad_x).max(10), h: sr.h };
+        let pad_x = (24.0 * z_scale).round().max(8.0) as i32;
+        let inner = Rect { x: sr.x + pad_x, y: sr.y, w: (sr.w - 2 * pad_x).max(16), h: sr.h };
         let label = format!("Z  {}", z.short_cite);
-        let pill_font = (24.0 * z_scale).clamp(10.0, 32.0);
-        crate::ui::ui_text_name(&mut a.screen, crate::font::FontFace::Bold, pill_font, (pill_font * 0.7).max(8.0), inner, &label, 1, 0);
+        let pill_font = (36.0 * z_scale).clamp(12.0, 48.0);
+        crate::ui::ui_text_name(&mut a.screen, crate::font::FontFace::Bold, pill_font, (pill_font * 0.65).max(10.0), inner, &label, 1, 0);
     }
     a.screen.clip = clip;
 }
