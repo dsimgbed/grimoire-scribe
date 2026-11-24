@@ -217,6 +217,8 @@ pub fn manifest(id: &str, name: &str, capabilities: &[&str], size: &str, artifac
 }
 
 pub const FIXED_400_300: &str = "    mode: fixed\n    default: [400, 300]\n";
+/// A resizable frame whose manifest asks for a smallest height under the smallest frame's (120).
+pub const SMALLEST_120_80: &str = "    mode: resizable\n    default: [220, 160]\n    min: [120, 80]\n    max: [400, 300]\n";
 pub const BOTH: [&str; 2] = ["editor:overlay", "storage:widget-local"];
 
 /// A package of the scenarios' data root: its id, name, manifest and module, and the SHA-256 its index entry
@@ -280,6 +282,8 @@ pub fn packages() -> Vec<Package> {
         package("test.host.many", "Many", &BOTH, FIXED_400_300, many(513)),
         // (its file is not the one its install recorded: the index has another module's SHA-256)
         Package { recorded: sha256_of(&keeps()), ..package("test.host.changed", "Changed", &BOTH, FIXED_400_300, wide()) },
+        // (installed with a smallest size of 120x80, under the smallest frame there is)
+        package("test.host.small", "Small", &BOTH, SMALLEST_120_80, wide()),
     ]
 }
 

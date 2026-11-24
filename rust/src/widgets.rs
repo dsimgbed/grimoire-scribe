@@ -18,9 +18,27 @@ const WIDGET_MINIMIZED: f32 = 112.0;
 const WIDGET_MARGIN: f32 = 28.0;
 /// How far each new widget is offset from the one before it.
 const WIDGET_CASCADE: f32 = 22.0;
-/// The smallest frame the editor will make, whatever a widget asks for, at 300 dpi.
-const WIDGET_FLOOR_W: f32 = 120.0;
-const WIDGET_FLOOR_H: f32 = 80.0;
+/// A frame's own parts, at 300 dpi: the title bar's height; the margin on each side of the body; the gap
+/// between the title bar and the body; and what a frame's height holds beside its title bar and its body
+/// (that gap and the margin under the body). `title_rect`, `close_rect` and `body_rect` lay a frame out with
+/// these, and the smallest frame is made of them too.
+const WIDGET_TITLE_H: f32 = 64.0;
+const WIDGET_BODY_SIDE: f32 = 14.0;
+const WIDGET_BODY_TOP: f32 = 8.0;
+const WIDGET_BODY_ROWS: f32 = 22.0;
+/// The smallest body's height: one line of the small text (`ui_small_size`).
+const WIDGET_BODY_MIN_H: f32 = 34.0;
+/// The smallest frame the editor will make, whatever a widget asks for, at 300 dpi: 120 by 120. Its height is
+/// the title bar, the rows around the body and the smallest body, so a frame at its smallest still has a body.
+pub const WIDGET_FLOOR_W: f32 = 120.0;
+pub const WIDGET_FLOOR_H: f32 = WIDGET_TITLE_H + WIDGET_BODY_ROWS + WIDGET_BODY_MIN_H;
+
+/// The smallest frame in screen pixels: what a manifest's sizes are checked against (widgetpkg.rs) and what
+/// `WidgetFrame::limits` and `WidgetHost::spawn` hold a frame to. The height is the sum of its parts as the
+/// layout rounds them, so at any scale the body of the smallest frame is `WIDGET_BODY_MIN_H` high exactly.
+pub fn widget_floor() -> (i32, i32) {
+    (ui_px(WIDGET_FLOOR_W), ui_px(WIDGET_TITLE_H) + ui_px(WIDGET_BODY_ROWS) + ui_px(WIDGET_BODY_MIN_H))
+}
 /// A frame never takes more than this share of the canvas either way.
 const WIDGET_MAX_SHARE: i32 = 70;
 
@@ -178,8 +196,7 @@ impl WidgetFrame {
     /// The sizes this frame may take on `area`: the widget's own bounds, never past the screen's
     /// floor and share.
     pub fn limits(&self, area: Rect) -> (i32, i32, i32, i32) {
-        let floor_w = ui_px(WIDGET_FLOOR_W);
-        let floor_h = ui_px(WIDGET_FLOOR_H);
+        let (floor_w, floor_h) = widget_floor();
         let share_w = (area.w * WIDGET_MAX_SHARE / 100).max(floor_w);
         let share_h = (area.h * WIDGET_MAX_SHARE / 100).max(floor_h);
         let min_w = ui_px(self.def.min_w).clamp(floor_w, share_w);
@@ -224,13 +241,26 @@ impl WidgetFrame {
 
     pub fn title_rect(&self) -> Rect {
         let r = self.rect();
-        let h = (ui_px(64.0)).min(r.h);
+        let h = (ui_px(WIDGET_TITLE_H)).min(r.h);
         Rect { x: r.x, y: r.y, w: r.w, h }
+    }
+
+    /// The body: what the package draws on, under the title bar and inside the frame's margins. A frame no
+    /// smaller than `widget_floor` has one at least `WIDGET_BODY_MIN_H` high.
+    pub fn body_rect(&self) -> Rect {
+        let r = self.rect();
+        let title = self.title_rect();
+        Rect {
+            x: r.x + ui_px(WIDGET_BODY_SIDE),
+            y: title.y + title.h + ui_px(WIDGET_BODY_TOP),
+            w: r.w - ui_px(2.0 * WIDGET_BODY_SIDE),
+            h: r.h - title.h - ui_px(WIDGET_BODY_ROWS),
+        }
     }
 
     pub fn close_rect(&self) -> Rect {
         let r = self.rect();
-        let side = ui_px(64.0).min(r.h).min(r.w / 3);
+        let side = ui_px(WIDGET_TITLE_H).min(r.h).min(r.w / 3);
         Rect { x: r.x + r.w - side, y: r.y, w: side, h: side }
     }
 
@@ -306,8 +336,9 @@ impl WidgetHost {
         }
         let mut f = WidgetFrame::new(def);
         let (_, _, max_w, max_h) = f.limits(area);
-        f.layout.w = f.layout.w.clamp(ui_px(WIDGET_FLOOR_W), max_w);
-        f.layout.h = f.layout.h.clamp(ui_px(WIDGET_FLOOR_H), max_h);
+        let (floor_w, floor_h) = widget_floor();
+        f.layout.w = f.layout.w.clamp(floor_w, max_w);
+        f.layout.h = f.layout.h.clamp(floor_h, max_h);
         // Top right of the canvas, left of the panel when the panel is there: the first thing a
         // new widget shows should not be hidden under the toolbar.
         let mut x = area.x + area.w - f.layout.w - ui_px(WIDGET_MARGIN);
@@ -552,6 +583,58 @@ mod tests {
         assert_eq!((f.layout.w, f.layout.h), (max_w, max_h));
         f.move_to(-500, 9000, area());
         assert!(f.layout.x >= area().x && f.layout.y + f.rect().h <= area().h);
+    }
+
+    /// A package that asks for less than any frame may be: its sizes are held to the floor.
+    static TINY_WIDGET: WidgetDef = WidgetDef {
+        id: "test.tiny",
+        name: "Tiny",
+        icon: IconKind::Grid,
+        default_w: 1.0,
+        default_h: 1.0,
+        min_w: 1.0,
+        min_h: 1.0,
+        max_w: 500.0,
+        max_h: 500.0,
+        resizable: true,
+        version: "",
+        author: "",
+        description: "",
+    };
+
+    #[test]
+    fn the_smallest_frame_still_has_a_body() {
+        assert_eq!((WIDGET_FLOOR_W, WIDGET_FLOOR_H), (120.0, 120.0));
+        // (the Scribe's 300 dpi, and other scales, where each part rounds on its own)
+        for dpi in [300.0, 226.0, 167.0, 212.0, 265.0, 359.0, 600.0] {
+            ui_init(dpi);
+            let (floor_w, floor_h) = widget_floor();
+            let body_min = ui_px(WIDGET_BODY_MIN_H);
+            assert!(body_min >= 1);
+            // Opened from the popup, resized to nothing, restored from a layout with no size, and clamped again:
+            // each is the floor, and the body there is as high as the smallest body and inside the frame.
+            let mut h = WidgetHost::new();
+            assert!(h.spawn(&TINY_WIDGET, area(), panel()));
+            let mut resized = WidgetFrame::new(&TINY_WIDGET);
+            resized.resize_to(1, 1, area());
+            let mut restored = WidgetHost::new();
+            restored.restore(&TINY_WIDGET, WidgetLayout { x: 40, y: 40, w: 1, h: 1, minimized: false, z: 0 }, area());
+            let mut clamped = WidgetFrame::new(&TINY_WIDGET);
+            clamped.layout.h = 0;
+            clamped.clamp(area());
+            for f in [&h.frames[0], &resized, &restored.frames[0], &clamped] {
+                assert_eq!((f.layout.w, f.layout.h), (floor_w, floor_h), "at {dpi} dpi");
+                let (r, title, body) = (f.rect(), f.title_rect(), f.body_rect());
+                assert_eq!(body.h, body_min, "at {dpi} dpi");
+                assert!(body.w > 0 && body.x > r.x && body.x + body.w < r.x + r.w, "at {dpi} dpi");
+                assert!(body.y > title.y + title.h && body.y + body.h < r.y + r.h, "at {dpi} dpi");
+            }
+            // The floor is a frame's least height at every size the limits give, whatever the canvas.
+            let small = Rect { x: 0, y: 0, w: 100, h: 100 };
+            let (min_w, min_h, max_w, max_h) = resized.limits(small);
+            assert!(min_w >= floor_w && min_h >= floor_h && max_w >= min_w && max_h >= min_h);
+        }
+        ui_init(300.0);
     }
 
     #[test]

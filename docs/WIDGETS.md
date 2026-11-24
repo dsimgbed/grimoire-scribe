@@ -128,8 +128,8 @@ spec:
 | `spec.icon` | optional; one of Grimoire's icons: `calculator`, `package`, `clock`, `timer`/`hourglass`, `music`, `notebook`, `pdf`, `image`/`photo`, `files`/`folder`, `search`, `download`, `language`, `gear`/`settings`, `update`, `paper`/`page`, `library`, `link`, `live`, `gamepad`, `eye`. A `md-` prefix is accepted. An unknown or omitted icon is the widget grid |
 | `spec.minimizable` | optional, default `true`. Accepted for forward compatibility; this build always draws the frame's minimize button |
 | `spec.size.mode` | `fixed` (default) or `resizable` |
-| `spec.size.default` | optional; `[width, height]` at 300 dpi, default `[220, 160]` |
-| `spec.size.min`, `spec.size.max` | `resizable` only; each side must be at least 120x80 at 300 dpi and at most 70% of the editor canvas either way (about 1302x1736 on a 1860x2480 Scribe). `min` may not exceed `max`. A `fixed` widget uses `default` for all three |
+| `spec.size.default` | optional; `[width, height]` at 300 dpi, default `[220, 160]`, within the same bounds as `min` and `max` |
+| `spec.size.min`, `spec.size.max` | `resizable` only; each side must be at least 120x120 at 300 dpi and at most 70% of the editor canvas either way (about 1302x1736 on a 1860x2480 Scribe). `min` may not exceed `max`. A `fixed` widget uses `default` for all three |
 
 Unknown top-level keys are ignored, so a newer manifest can carry fields an older Grimoire does not
 know; unknown keys inside `spec` are ignored too. Values of the known fields are checked where
@@ -144,12 +144,18 @@ release asset is a single file, never an archive.
 
 `spec.size` values are pixels at 300 dpi, the Scribe's panel. Grimoire scales them by the panel's
 dpi when it draws the frame, so the widget is the same physical size on every device. The floor is
-120x80 at 300 dpi; the ceiling is 70% of the editor canvas in either direction. A frame is placed
+120x120 at 300 dpi; the ceiling is 70% of the editor canvas in either direction. A frame is placed
 at the top right of the editor, cascading down as more open, and is clamped onto the screen after
 a rotation or a window-size change.
 
 `mode: resizable` gives the bottom-right grip and clamps to `min` and `max`; `mode: fixed` omits the
 grip and keeps the frame at `default`.
+
+The floor's height is what a frame is made of: the title bar (64), the gap and margin above and
+below the body (22) and the smallest body (34, one line of small text). The body is the frame less
+its title bar and margins, 28 narrower and 86 shorter, so the smallest frame has a body of 92x34 to
+draw on. A manifest whose `default`, `min` or `max` is below the floor is refused, and a frame is
+never opened, restored or resized below it, whatever an installed manifest says.
 
 ### Capabilities
 
@@ -517,7 +523,7 @@ what it shows there can still be misleading, so the trust decision remains yours
 - [ ] `license` and a license file or `license_url`
 - [ ] `spec.runtime: wasm`, and the module exports `memory`, `widget_draw` and `widget_tap`
 - [ ] `capabilities` declares `editor:overlay` for a widget that draws and `storage:widget-local` for one that saves state
-- [ ] `spec.size` within 120x80 and 70% of the canvas
+- [ ] `spec.size` within 120x120 and 70% of the canvas
 - [ ] `platforms` correct, `min_grimoire_version` honest
 - [ ] any `settings` keys, labels, defaults and choices are final; changing a key loses its saved value
 - [ ] tested from a clean data root: install, open, move, close, update, remove; open Settings and toggle each row

@@ -2567,9 +2567,7 @@ fn draw_widgets(a: &mut App, r: Rect) {
 }
 
 fn widget_body(f: &WidgetFrame) -> Rect {
-    let r = f.rect();
-    let title = f.title_rect();
-    Rect { x: r.x + ui_px(14.0), y: title.y + title.h + ui_px(8.0), w: r.w - ui_px(28.0), h: r.h - title.h - ui_px(22.0) }
+    f.body_rect()
 }
 
 fn draw_widget_frame(a: &mut App, i: usize) {

@@ -799,8 +799,9 @@ pub fn widget_package_validate(p: &WidgetPackage, canvas_w: i32, canvas_h: i32) 
             return Err("a `releases` entry has an invalid sha256".into());
         }
     }
-    let floor_w = ui_px(120.0).max(1);
-    let floor_h = ui_px(80.0).max(1);
+    // (the smallest frame is the layout's: a title bar, the margins and a body, widgets.rs)
+    let (floor_w, floor_h) = crate::widgets::widget_floor();
+    let (floor_w, floor_h) = (floor_w.max(1), floor_h.max(1));
     let ceil_w = (canvas_w * 70 / 100).max(floor_w);
     let ceil_h = (canvas_h * 70 / 100).max(floor_h);
     let s = &p.spec.size;
@@ -1730,7 +1731,7 @@ spec:
   size:
     mode: resizable
     default: [220, 160]
-    min: [120, 80]
+    min: [120, 120]
     max: [800, 600]
 "#,
             sha = sha256_of(b"test")
@@ -1772,6 +1773,26 @@ spec:
             let p = widget_package_parse(&bad).unwrap();
             let e = widget_package_validate(&p, 1860, 2480).unwrap_err();
             assert!(e.contains(want), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_size_below_the_smallest_frame_is_refused() {
+        ui_init(300.0);
+        let good = manifest("com.example.test");
+        // 120x120 is the smallest frame: a title bar, the margins and a body one line high.
+        for (size, ok) in [("min: [120, 120]", true), ("min: [120, 119]", false), ("min: [119, 120]", false), ("min: [120, 80]", false)] {
+            let p = widget_package_parse(&good.replace("min: [120, 120]", size)).unwrap();
+            let got = widget_package_validate(&p, 1860, 2480);
+            assert_eq!(got.is_ok(), ok, "{size}: {got:?}");
+            if let Err(e) = got {
+                assert!(e.contains("below the minimum of 120x120"), "{e}");
+            }
+        }
+        for (size, ok) in [("default: [120, 120]", true), ("default: [220, 119]", false)] {
+            let fixed = good.replace("mode: resizable", "mode: fixed").replace("default: [220, 160]", size);
+            let p = widget_package_parse(&fixed).unwrap();
+            assert_eq!(widget_package_validate(&p, 1860, 2480).is_ok(), ok, "{size}");
         }
     }
 

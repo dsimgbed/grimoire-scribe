@@ -101,4 +101,24 @@ shot 05-changed
 tap panel widget.0.close
 wait 300
 expect editor.widgets is 0
+# Small is installed with a smallest size of 120x80, less than a frame's title bar and margins take. Dragged by
+# its grip as small as it goes, the frame stops at 120x120, the smallest there is, and still has a body: 92x34 at
+# 1470,100, which the module fills (checked left of the corner the frame's own grip is drawn on).
+tap panel widgets
+wait 300
+tap panel widgets.test.host.small
+wait 400
+expect editor.widgets is 1 test.host.small
+expect editor.widget.0.rect is 1456 28 220 160
+drag touch 1649 161 1300 40 8
+wait 400
+expect editor.owner is none
+expect editor.widget.0.rect is 1456 28 120 120
+expect editor.widget.0.error is
+expect editor.widget.0.hits is 2
+expect display.dark.1470.100.60.34 is 2040
+shot 06-small
+tap panel widget.0.close
+wait 300
+expect editor.widgets is 0
 quit
