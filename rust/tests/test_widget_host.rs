@@ -459,25 +459,31 @@ fn lengths_are_held_before_memory_is_read() {
 
 #[test]
 fn request_redraw_has_a_shortest_and_a_longest_delay() {
-    use std::time::{Duration, Instant};
     let root = fresh_root("redraw");
     let mut c = patterned(700, 600);
-    let ms = |n: i32| Duration::from_millis(n as u64);
+    // (times are the app's clock, `now_ms`: milliseconds that wrap)
+    let after = |t: u32, ms: i32| t.wrapping_add(ms as u32);
     for (i, (asked, given)) in [(i32::MIN, WIDGET_REDRAW_MIN_MS), (-5, WIDGET_REDRAW_MIN_MS), (0, WIDGET_REDRAW_MIN_MS), (1, WIDGET_REDRAW_MIN_MS), (16, WIDGET_REDRAW_MIN_MS), (WIDGET_REDRAW_MIN_MS, WIDGET_REDRAW_MIN_MS), (WIDGET_REDRAW_MIN_MS + 1, WIDGET_REDRAW_MIN_MS + 1), (5000, 5000), (i32::MAX, WIDGET_REDRAW_MAX_MS)].into_iter().enumerate() {
         let mut rt = installed(&format!("test.redraw.{i}"), &BOTH, &draws(&call("request_redraw", &[asked])));
-        let t0 = Instant::now();
-        assert!(!rt.redraw_due(t0 + ms(WIDGET_REDRAW_MAX_MS)), "nothing is asked for before the first pass");
+        let t0 = now_ms();
+        assert!(!rt.redraw_due(after(t0, WIDGET_REDRAW_MAX_MS)), "nothing is asked for before the first pass");
         rt.draw(&mut c, BODY);
-        let t1 = Instant::now();
-        assert!(!rt.redraw_due(t0 + ms(given - 1)), "request_redraw({asked}) is not due before {given} ms");
-        assert!(rt.redraw_due(t1 + ms(given)), "request_redraw({asked}) is due after {given} ms");
+        let t1 = now_ms();
+        assert!(!rt.redraw_due(after(t0, given - 1)), "request_redraw({asked}) is not due before {given} ms");
+        assert!(rt.redraw_due(after(t1, given)), "request_redraw({asked}) is due after {given} ms");
+        // The request is taken once, when it is due, and not before; the next pass's request is another.
+        assert!(!rt.redraw_taken(after(t0, given - 1)));
+        assert!(rt.redraw_taken(after(t1, given)));
+        assert!(!rt.redraw_taken(after(t1, given)) && !rt.redraw_due(after(t1, WIDGET_REDRAW_MAX_MS)), "taken once");
+        rt.draw(&mut c, BODY);
+        assert!(rt.redraw_due(after(now_ms(), given)), "the next pass asks again");
     }
     assert_eq!(WIDGET_REDRAW_MIN_MS, 100);
     // A module that asked and then stopped is not drawn again: nothing stays due.
     let mut rt = installed("test.redraw.stops", &BOTH, &draws(&[call("request_redraw", &[100]), times(WIDGET_PASS_COMMANDS_MAX + 1, rect(0, 0, 8, 8, 0))].concat()));
     rt.draw(&mut c, BODY);
     assert_eq!(rt.error(), Some(STOPPED));
-    assert!(!rt.redraw_due(Instant::now() + ms(WIDGET_REDRAW_MAX_MS)));
+    assert!(!rt.redraw_due(after(now_ms(), WIDGET_REDRAW_MAX_MS)));
     let _ = std::fs::remove_dir_all(&root);
 }
 

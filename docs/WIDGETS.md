@@ -283,7 +283,7 @@ body, is a tap on no region.
 | `button` | a button with its own label; it is also a hit region with `id` |
 | `hit` | a hit region with `id`, without drawing anything |
 | `status` | the text the editor's `editor.widget.N.status` probe reads, for tests and debugging |
-| `request_redraw` | asks for `widget_draw` again after `after_ms` (100 to 86,400,000; a value outside is taken as the nearer end); a clock calls it once per draw, and a package that never calls it is only drawn when something else repaints |
+| `request_redraw` | asks for `widget_draw` again after `after_ms` (100 to 86,400,000; a value outside is taken as the nearer end); a clock calls it once per draw, and a package that never calls it is only drawn when something else repaints. When the time has come the frame is drawn again and its rectangle is refreshed once. A minimized frame draws no body, so its request waits until the frame is restored, and a request waits while a finger or the pen is down or a menu or sheet is open |
 | `setting` | copies one saved setting's value into `out_ptr` and returns its byte length, or `0`; `out_cap` caps the copy |
 | `state_get` | copies the saved state into `ptr` and returns its byte length, or `0`; `cap` caps the copy. `state_get` and `state_set` need `storage:widget-local` |
 | `state_set` | replaces the saved state with the bytes at `ptr`; the first 64 KiB are kept |
@@ -434,9 +434,11 @@ have them. The fixtures and scenarios under `tests/` are the working examples:
   that declares no capability, one a command past a pass's limit, one whose file is not the one
   installed, one resized to the smallest frame, and one whose id is 128 bytes long.
   `z_widget_host_kept.qs` starts Grimoire again on that data and finds the last one's frame.
-- `tests/fixtures/widgetruns/` holds the packages whose modules run for long, written the same way,
-  and `tests/scenarios/z_widget_runs.qs` opens them with app time on the script's clock: one whose
-  drawing pass never ends, which is stopped when its instruction budget is used up.
+- `tests/fixtures/widgetruns/` holds the packages whose modules run for long or again and again,
+  written the same way, and `tests/scenarios/z_widget_runs.qs` opens them with app time on the
+  script's clock: one whose drawing pass never ends, which is stopped when its instruction budget is
+  used up, and one that asks to be drawn again each second, whose passes and refreshes are counted
+  while its frame is open and while it is minimized.
 - `rust/tests/test_widget_host.rs` holds the same rules as unit tests of the host, pixel by pixel
   and limit by limit.
 

@@ -467,11 +467,31 @@ pub fn loops() -> Vec<u8> {
     Wasm::new(forever(&[])).bytes()
 }
 
-/// The packages of tests/fixtures/widgetruns, in the order of its index: modules that run for long.
+/// Where `ticker` keeps its count.
+pub const COUNT_AT: i32 = 100;
+
+/// A module that counts its drawing passes: each pass adds one to a character that starts at '0' and says it in
+/// the status line ("1" after the first pass), asks to be drawn again `after_ms` later, and draws a rectangle.
+pub fn ticker(after_ms: i32) -> Vec<u8> {
+    let mut draw = code(&[Op::I(COUNT_AT), Op::I(COUNT_AT)]);
+    draw.extend_from_slice(&[0x2d, 0x00, 0x00]); // i32.load8_u
+    draw.extend(code(&[Op::I(1), Op::Add, Op::Store8]));
+    draw.extend(code(&status(COUNT_AT, 1)));
+    draw.extend(code(&call("request_redraw", &[after_ms])));
+    draw.extend(code(&rect(10, 10, 60, 30, 1)));
+    let mut w = Wasm::new(draw);
+    w.data = vec![(COUNT_AT as u32, b"0".to_vec())];
+    w.bytes()
+}
+
+/// The packages of tests/fixtures/widgetruns, in the order of its index: modules that run for long, or again
+/// and again.
 pub fn packages_that_run() -> Vec<Package> {
     vec![
         // (its drawing pass never ends; its manifest names no size, so its frame is the default one, 220x160)
         package("test.runs.loop", "Loop", &BOTH, UNSIZED, loops()),
+        // (it asks to be drawn again a second after each pass)
+        package("test.runs.ticker", "Ticker", &BOTH, UNSIZED, ticker(1000)),
     ]
 }
 

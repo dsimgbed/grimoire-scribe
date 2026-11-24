@@ -5,6 +5,8 @@
 # Widget modules that run for long (issue #208), with the packages of tests/fixtures/widgetruns (written by
 # rust/tests/widgetfix: `make widget-fixtures`). App time is the script's (GRIMOIRE_SIM_CLOCK=script): each
 # `wait` moves it on by exactly its milliseconds, so what comes due in a stretch is the same on any machine.
+# (the clock corner held still: its minute's refresh would land among the counted ones)
+clock 1700000000
 wait 3600
 tap 965 95
 wait 100
@@ -24,6 +26,63 @@ expect editor.widget.0.error is The widget stopped: all fuel consumed by WebAsse
 expect editor.widget.0.hits is 0
 shot 01-loop
 # (the frame is still a frame: it closes)
+tap panel widget.0.close
+wait 300
+expect editor.widgets is 0
+# Ticker counts its drawing passes in its status line, draws a rectangle and asks to be drawn again a second
+# later. A frame whose pass is due is drawn again and its rectangle refreshed once; while nothing is due, nothing
+# is drawn and nothing is refreshed. (Each `waitfor` ends in the round the pass it names ran in, so the next
+# pass is due one second of app time after it.)
+tap panel widgets
+wait 300
+tap panel widgets.test.runs.ticker
+wait 400
+expect editor.widgets is 1 test.runs.ticker
+expect editor.widget.0.rect is 1456 28 220 160
+expect editor.widget.0.error is
+expect editor.widget.0.status is 1
+waitfor editor.widget.0.status is 2
+expect display.presents not -1
+# 900 ms after a pass: no pass, no refresh.
+wait 900
+expect editor.widget.0.status is 2
+expect display.presents is
+# 200 ms more: the pass that was due, and one refresh of the frame's rectangle.
+wait 200
+expect editor.widget.0.status is 3
+expect display.presents is ui 1456 28 220 160
+# And so on, a pass and a refresh a second.
+waitfor editor.widget.0.status is 4
+expect display.presents is ui 1456 28 220 160
+wait 900
+expect editor.widget.0.status is 4
+expect display.presents is
+wait 200
+expect editor.widget.0.status is 5
+expect display.presents is ui 1456 28 220 160
+shot 02-ticker
+# Minimized, the frame draws no body: its module has no pass and its square is not refreshed, however long the
+# request has been due. Three seconds: nothing.
+tap panel widget.0.min
+wait 300
+expect editor.widget.0.state is minimized
+expect editor.widget.0.rect is 1456 28 112 112
+expect display.presents not -1
+wait 3000
+expect editor.widget.0.status is 5
+expect display.presents is
+# Restored, the frame is drawn (the pass its request waited for), and then again a second later, as before.
+tap panel widget.0.title
+wait 300
+expect editor.widget.0.state is normal
+expect editor.widget.0.status is 6
+expect display.presents not -1
+wait 600
+expect editor.widget.0.status is 6
+expect display.presents is
+wait 200
+expect editor.widget.0.status is 7
+expect display.presents is ui 1456 28 220 160
 tap panel widget.0.close
 wait 300
 expect editor.widgets is 0

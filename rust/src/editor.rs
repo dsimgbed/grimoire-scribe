@@ -8443,21 +8443,24 @@ fn widget_tick(a: &mut App, now: u32) {
     }
 }
 
-/// editor_tick: an open package that asked for a later draw (a clock, a countdown) has its frame
-/// refreshed then; a package that never asks is only drawn when something else repaints it.
-fn widget_runtime_tick(a: &mut App) {
+/// editor_tick: an open frame whose module asked for a later drawing pass (a clock, a countdown) is drawn
+/// again when the pass is due, and its rectangle is refreshed once; a module that never asks is only drawn
+/// when something else repaints it. A minimized frame draws no body, so its request waits until the frame is
+/// restored (which draws it). While nothing is due, nothing is drawn and nothing is refreshed.
+fn widget_runtime_tick(a: &mut App, now: u32) {
     let s = ed_ref(a);
     if !s.open || a.asleep || s.owner != Owner::None || s.peek.active || sheet_open(s) || crate::library::library_settings_active(a) {
         return;
     }
-    let now = std::time::Instant::now();
     let mut dirty: Option<Rect> = None;
-    for f in &s.widgets.frames {
-        if f.runtime.as_ref().is_some_and(|r| r.redraw_due(now)) {
+    for f in &mut ed(a).widgets.frames {
+        // (the request is taken here: the pass below answers it, and the module asks again if it wants another)
+        if !f.layout.minimized && f.runtime.as_mut().is_some_and(|r| r.redraw_taken(now)) {
             dirty = Some(dirty.map_or(f.rect(), |r| rect_union(r, f.rect())));
         }
     }
     if let Some(r) = dirty {
+        compose(a, r);
         app_invalidate(a, r, RefreshMode::Ui);
     }
 }
@@ -12612,7 +12615,7 @@ pub fn editor_tick(a: &mut App, now: u32) {
     // A pen held still in Select mode: a paste there (select.rs).
     if ed(a).open {
         sel_tick(a, now);
-        widget_runtime_tick(a);
+        widget_runtime_tick(a, now);
         if ed_ref(a).owner == Owner::Widget {
             widget_tick(a, now);
         }

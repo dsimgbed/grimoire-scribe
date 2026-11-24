@@ -43,7 +43,6 @@
 
 use crate::prelude::*;
 use crate::widgetpkg::{WIDGET_CAP_OVERLAY, WIDGET_CAP_STORAGE};
-use std::time::{Duration, Instant};
 use wasmi::{Caller, Config, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode};
 
 const ABI: &str = "grimoire";
@@ -121,7 +120,8 @@ struct HostState {
     status: String,
     dirty: bool,
     limits: StoreLimits,
-    redraw_at: Option<Instant>,
+    /// when the module asked to be drawn again, by the app's clock (`now_ms`); None when it did not
+    redraw_at: Option<u32>,
 }
 
 /// One open package's WebAssembly instance, its last draw and its saved state.
@@ -234,8 +234,8 @@ impl WidgetRuntime {
             Ok(())
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "request_redraw", |mut caller: Caller<'_, HostState>, after_ms: i32| {
-            let after_ms = after_ms.clamp(WIDGET_REDRAW_MIN_MS, WIDGET_REDRAW_MAX_MS) as u64;
-            caller.data_mut().redraw_at = Some(Instant::now() + Duration::from_millis(after_ms));
+            let after_ms = after_ms.clamp(WIDGET_REDRAW_MIN_MS, WIDGET_REDRAW_MAX_MS) as u32;
+            caller.data_mut().redraw_at = Some(now_ms().wrapping_add(after_ms));
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "setting", |mut caller: Caller<'_, HostState>, key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32| -> i32 {
             // (no setting has a longer key: nothing is read for one)
@@ -285,7 +285,7 @@ impl WidgetRuntime {
         }
         let draw = match self.instance.get_typed_func::<(i32, i32, i32), ()>(&self.store, "widget_draw") {
             Ok(f) => f,
-            Err(e) => { self.error = Some(format!("The widget has no widget_draw export: {e}")); return; }
+            Err(e) => { self.stopped(format!("The widget has no widget_draw export: {e}")); return; }
         };
         self.store.data_mut().status.clear();
         self.begin_call();
@@ -400,9 +400,20 @@ impl WidgetRuntime {
         self.hits.len()
     }
 
-    /// Whether the package asked for its next draw by now.
-    pub fn redraw_due(&self, now: Instant) -> bool {
-        self.store.data().redraw_at.is_some_and(|at| at <= now)
+    /// Whether the module asked for a drawing pass that is due at `now`, by the app's clock (`now_ms`,
+    /// which wraps: the longest delay is far under half its range).
+    pub fn redraw_due(&self, now: u32) -> bool {
+        self.error.is_none() && self.store.data().redraw_at.is_some_and(|at| now.wrapping_sub(at) as i32 >= 0)
+    }
+
+    /// `redraw_due`, and the request is taken: the editor's tick asks this once for a frame it then
+    /// draws, so one request brings one drawing pass and one refresh, whatever the pass does.
+    pub fn redraw_taken(&mut self, now: u32) -> bool {
+        let due = self.redraw_due(now);
+        if due {
+            self.store.data_mut().redraw_at = None;
+        }
+        due
     }
 
     /// Writes the state file after a call that changed the state. A package without
