@@ -1,12 +1,13 @@
 # settings: status_mode=1
 # What's new: the bat (or the name beside it) opens the card, with Read all and Dismiss and no box
 # (the owner's rule of 2026-11-05). The card shows this version's notes and ends at the last of them
-# that fits whole above the signature and the Library's pager (2.1.0-beta.2's notes: all 11 upright, the first 10 sideways and the rest Read all's;
+# that fits whole above the signature and the Library's pager (2.1.0's notes: all 12 upright, the first 9 sideways and the rest Read all's;
+# 2.1.0-beta.2's: all 11 upright, the first 10 sideways;
 # 2.0.0's 11 showed all upright and the first 9 sideways, the rest Read all's; 2.1.0: sideways
 # the first 10 reached over the pager's left button and the P of its Page 1 of 1). Read all opens the list of every version's notes (2.1.0; z_about_list.qs),
 # and its row for this version shows the whole notes on the sheet, on one page (the owner, 2026-11-07:
 # "fit all"), with no page arrows: 2.0.0's notes, two pages both ways at 44 px, keep 44 px upright set
-# closer (the leading 1.19, the gaps smaller), and sideways, where even the closest look at 44 px takes
+# closer (the leading 1.22 since #115 shortened them, 1.19 before; the gaps smaller), and sideways, where even the closest look at 44 px takes
 # two pages, are set in Jersey 10's next size down (from 43 px) at the leading they always had (2.1.0,
 # the owner: "The note reading itself isn't polished enough"). Dismiss closes the card and the sheet.
 # The counts are the notes' (card_notes, card_blocks, body_px, lead, the row's version): every
@@ -21,20 +22,20 @@ tap 120 95
 wait 100
 expect library.sheet is about
 expect library.about.full is 0
-expect library.about.card_notes is 11
-expect library.about.card_blocks is 11
+expect library.about.card_notes is 12
+expect library.about.card_blocks is 12
 expect library.about.card_cut is 0
 shot 01-card
 rotate 1
 wait 200
 expect library.sheet is about
 expect library.about.full is 0
-expect library.about.card_blocks is 10
+expect library.about.card_blocks is 9
 expect library.about.card_cut is 0
 shot 02-card-sideways
 rotate 0
 wait 200
-expect library.about.card_blocks is 11
+expect library.about.card_blocks is 12
 tap library about.more
 wait 100
 expect library.about.view is list
@@ -48,7 +49,7 @@ expect library.about.full is 1
 expect library.about.pages is 1
 expect library.about.page is 1
 expect library.about.body_px is 44
-expect library.about.lead is 1.19
+expect library.about.lead is 1.22
 expect library.about.signature is 1
 expect library.ui_has.about.next is 0
 expect library.ui_has.about.prev is 0

@@ -26,12 +26,11 @@ def status(token):
     return json.loads(body) if code == 200 else None
 
 
-# The server renders two PDFs at a time (httpd.c MAX_CHILDREN), so of 8 at once the last ones wait
-# at least three renders: queued long enough to be seen even where one render is quick (a small
-# notebook on a fast CI machine missed a single waiting download between two polls). One watcher a
-# download, each asking about its own for as long as it runs: asked one after another, a status
-# request a round of the app's idle loop each (about 40 ms), the eight were seen only three times
-# in the second the batch takes, and on a slower machine no request found a download preparing.
+# The server renders two PDFs at a time (httpd.c MAX_CHILDREN), and share_check.sh makes each
+# render take a second: of 8 at once the last ones wait several renders. One watcher a download,
+# each asking about its own for as long as it runs, so queued and preparing are seen even where a
+# status request is slow (asked one after another, a status request a round of the app's idle loop
+# each, about 40 ms, the eight were asked about only a few times a second).
 tokens = [uuid.uuid4().hex for _ in range(8)]
 
 

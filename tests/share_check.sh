@@ -39,8 +39,9 @@ if [ -f "$ROOT/settings.ini" ]; then
     mv "$B/settings.ini" "$ROOT/settings.ini"
 fi
 echo "http_port=$PORT" >> "$ROOT/settings.ini"
-# Renders slowed down a little (as on the Kindle) so concurrent requests really queue.
-GRIMOIRE_HTTPD_DELAY_MS=150 GRIMOIRE_ROOT="$ROOT" GRIMOIRE_SCRIPT="$B/c_share_long.qs" \
+# Renders slowed down (as on the Kindle) so concurrent requests really queue, and long enough that
+# every state in tests/download_check.py is still seen when its round of status polls is slow.
+GRIMOIRE_HTTPD_DELAY_MS=1000 GRIMOIRE_ROOT="$ROOT" GRIMOIRE_SCRIPT="$B/c_share_long.qs" \
     GRIMOIRE_SHOTS=$BUILD/shots/c_share "$HEADLESS" 2>"$B/app.log" &
 APP=$!
 URL=http://127.0.0.1:$PORT
@@ -116,6 +117,7 @@ check "pdf attachment header" "grep -qi 'content-disposition: attachment' $B/pdf
 check "pdf renders (sips)" "sips -s format png $B/nb.pdf --out $B/nb-pdf.png >/dev/null 2>&1"
 python3 -I tests/download_check.py "$URL" "$ID" "$B/nb.pdf"
 node tests/download_ui_check.js
+node tests/upload_ui_check.js
 check "PDF progress UI on both pages" "grep -q GRIMOIRE_DOWNLOAD_WORDS $B/index.html && grep -q GRIMOIRE_DOWNLOAD_WORDS $B/nb.html"
 curl -fsS "$URL/nb/$ID/1.png" -o "$B/p1.png"
 check "page png" "file $B/p1.png | grep -q 'PNG image data, 1860 x 2480'"
