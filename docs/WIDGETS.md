@@ -244,10 +244,16 @@ now() -> i64
 300 dpi by multiplying with `scale_milli / 1000.0`. Drawing coordinates are relative to the body's
 top-left.
 
+The body is all a widget draws on. Every rectangle, text and button is clipped to it, whatever
+coordinates and sizes the module passes: what reaches past an edge of the body is cut off there, and
+nothing is drawn on the frame's title bar, on another frame, on the toolbar or on the page. A hit
+region is the part of it that lies inside the body, and a tap in the frame's margin, beside the
+body, is a tap on no region.
+
 | import | |
 |---|---|
 | `rect` | a rectangle in the frame; `style` is `0` normal, `1` selected or `2` disabled |
-| `text` | UTF-8 text at `ptr`, `len` in the module's memory, `px` high, centered when `center` is nonzero |
+| `text` | UTF-8 text at `ptr`, `len` in the module's memory, `px` high (1 to 512: a smaller or larger value is drawn at the nearer end), centered when `center` is nonzero |
 | `button` | a button with its own label; it is also a hit region with `id` |
 | `hit` | a hit region with `id`, without drawing anything |
 | `status` | the text the editor's `editor.widget.N.status` probe reads, for tests and debugging |
@@ -431,8 +437,8 @@ There is no package signing and no revocation list.
 
 A widget is confined to its frame, its settings and its own state file. The module has no network,
 filesystem or process access; the only files the host touches for it are the artifact it was
-installed from and `state/runtime.bin`. It still runs with the reader's full screen and can draw
-misleading content, so the trust decision remains yours.
+installed from and `state/runtime.bin`. It draws in its frame's body and nowhere else on the screen;
+what it shows there can still be misleading, so the trust decision remains yours.
 
 ## Checklist
 

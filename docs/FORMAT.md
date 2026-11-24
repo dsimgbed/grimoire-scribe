@@ -1708,8 +1708,9 @@ state_set(ptr, len)
 now() -> i64
 ```
 
-Coordinates are screen pixels inside the frame body. `style` is `0` normal, `1` selected or `2`
-disabled. Strings are UTF-8 in the module's memory. `request_redraw` names the delay before the
+Coordinates are screen pixels inside the frame body, and the body is all a module draws on: a
+command is clipped to it, and a hit region is the part of it inside the body. `style` is `0` normal,
+`1` selected or `2` disabled. Strings are UTF-8 in the module's memory. `request_redraw` names the delay before the
 host draws the widget again (16 ms to 24 hours), for a clock or a countdown. `setting` returns the bytes written for one of
 the package's saved settings (empty when it is missing); `state_get`/`state_set` read and write the
 widget's saved state in `packages/widgets/<id>/state/runtime.bin`, capped at 64 KiB. `status` sets

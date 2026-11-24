@@ -14,6 +14,10 @@
 //! body. A package keeps its state through `state_get` / `state_set`, which the host saves under
 //! `packages/widgets/<id>/state/runtime.bin`.
 //!
+//! The body is all a module draws on and is tapped in: every command is drawn with the canvas
+//! clipped to the body, whatever coordinates and sizes it carries, and a hit region is the part of
+//! it inside the body (`WidgetRuntime::draw`).
+//!
 //! Imports (`grimoire`):
 //!
 //! ```text
@@ -44,6 +48,12 @@ const STATE_FILE: &str = "state/runtime.bin";
 const FUEL_PER_CALL: u64 = 20_000_000;
 /// A widget's linear memory may not grow past this, so one package cannot exhaust the device.
 const MEMORY_MAX: usize = 32 * 1024 * 1024;
+/// A text is drawn at most this many pixels high; a larger `px` is drawn at this size.
+pub const WIDGET_TEXT_PX_MAX: i32 = 512;
+/// How far outside the body, in pixels, an edge of a command's rectangle is still kept as given. A
+/// farther edge is moved in to this distance: what shows in the body is the same, and the sums the
+/// drawing makes with the rectangle stay small.
+const DRAW_REACH: i64 = 1 << 16;
 
 /// A drawing command recorded by the module and rendered by the host. Coordinates are body-local.
 #[derive(Clone, Debug)]
@@ -163,7 +173,7 @@ impl WidgetRuntime {
         Ok(WidgetRuntime { _engine: engine, store, instance, hits: Vec::new(), texts: Vec::new(), status: String::new(), error: None })
     }
 
-    /// Calls `widget_draw` and renders its commands into `body`.
+    /// Calls `widget_draw` and renders its commands into `body`, and nowhere else on the canvas.
     pub fn draw(&mut self, c: &mut Canvas, body: Rect) {
         if self.error.is_some() {
             return;
@@ -182,32 +192,38 @@ impl WidgetRuntime {
         }
         self.save();
         let commands = std::mem::take(&mut self.store.data_mut().commands);
-        self.hits = std::mem::take(&mut self.store.data_mut().hits);
+        let hits = std::mem::take(&mut self.store.data_mut().hits);
+        self.hits = hits.into_iter().filter_map(|(id, r)| hit_in_body(body, r).map(|r| (id, r))).collect();
         self.status = std::mem::take(&mut self.store.data_mut().status);
         self.texts.clear();
+        // Nothing below draws outside the body: the canvas is clipped to it (and to what the caller
+        // already clipped to) until the commands are drawn.
+        let clip = c.clip;
+        canvas_set_clip(c, rect_intersect(clip, body));
         canvas_fill(c, body, 255);
         for cmd in commands {
             match cmd {
                 DrawCmd::Rect { x, y, w, h, style } => {
-                    let r = Rect { x: body.x + x, y: body.y + y, w, h };
+                    let r = on_screen(body, x, y, w, h);
                     let fill = match style { 1 => 210, _ => 255 };
                     ui_frame(c, r, ui_px(8.0), fill, true, 0);
                     ui_frame(c, r, ui_px(8.0), 0, false, ui_px(2.0));
                 }
                 DrawCmd::Text { x, y, w, h, text, px, center } => {
-                    let r = Rect { x: body.x + x, y: body.y + y, w, h };
-                    let px = px.max(1) as f32;
+                    let r = on_screen(body, x, y, w, h);
+                    let px = px.clamp(1, WIDGET_TEXT_PX_MAX) as f32;
                     ui_text(c, FontFace::Regular, px, px, r, &text, 1, center, 0);
                     self.texts.push(text);
                 }
                 DrawCmd::Button { x, y, w, h, text, style } => {
-                    let r = Rect { x: body.x + x, y: body.y + y, w, h };
+                    let r = on_screen(body, x, y, w, h);
                     let style = match style { 1 => ButtonStyle::Selected, 2 => ButtonStyle::Disabled, _ => ButtonStyle::Plain };
                     ui_button(c, r, IconKind::None, &text, style);
                     self.texts.push(text);
                 }
             }
         }
+        c.clip = clip;
     }
 
     /// Sends a tap in body-local coordinates. Returns whether the module was called.
@@ -275,6 +291,27 @@ impl WidgetRuntime {
             st.dirty = true;
         }
     }
+}
+
+/// A command's rectangle on the screen. A module passes any numbers: the edges are summed in 64
+/// bits and held within DRAW_REACH of the body, so no later sum overflows. A width or height that
+/// is not positive stays so (an empty rectangle draws nothing).
+fn on_screen(body: Rect, x: i32, y: i32, w: i32, h: i32) -> Rect {
+    fn edge(origin: i32, len: i32, at: i64) -> i32 {
+        (origin as i64 + at).clamp(origin as i64 - DRAW_REACH, origin as i64 + len.max(0) as i64 + DRAW_REACH) as i32
+    }
+    let (x0, x1) = (edge(body.x, body.w, x as i64), edge(body.x, body.w, x as i64 + w as i64));
+    let (y0, y1) = (edge(body.y, body.h, y as i64), edge(body.y, body.h, y as i64 + h as i64));
+    Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+}
+
+/// The part of a hit region (body-local) that is inside the body, or None when no part is.
+fn hit_in_body(body: Rect, r: Rect) -> Option<Rect> {
+    let x0 = (r.x as i64).max(0);
+    let y0 = (r.y as i64).max(0);
+    let x1 = (r.x as i64 + r.w as i64).min(body.w as i64);
+    let y1 = (r.y as i64 + r.h as i64).min(body.h as i64);
+    (x1 > x0 && y1 > y0).then(|| Rect { x: x0 as i32, y: y0 as i32, w: (x1 - x0) as i32, h: (y1 - y0) as i32 })
 }
 
 fn read_mem(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Vec<u8> {
