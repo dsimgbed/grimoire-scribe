@@ -328,15 +328,29 @@ impl WidgetHost {
         }
     }
 
+    /// The next z number, for the frame that goes on top. The numbers only order the frames, so when the next
+    /// one would be the largest an i32 holds (widgets.ini is a file a hand can edit: a line may say any number)
+    /// the open frames are counted again from 0 in the order they have, and no sum passes that number.
+    fn top_z(&mut self) -> i32 {
+        if self.next_z == i32::MAX {
+            for (rank, i) in self.draw_order().into_iter().enumerate() {
+                self.frames[i].layout.z = rank as i32;
+            }
+            self.next_z = self.frames.len() as i32;
+        }
+        let z = self.next_z.max(0);
+        self.next_z = z + 1;
+        z
+    }
+
     /// Raises a frame to the top, returning whether its z changed.
     pub fn raise(&mut self, index: usize) -> bool {
-        let Some(f) = self.frames.get_mut(index) else { return false };
-        let z = self.next_z.max(0);
-        if f.layout.z == z {
+        let Some(f) = self.frames.get(index) else { return false };
+        if f.layout.z == self.next_z.max(0) {
             return false;
         }
-        f.layout.z = z;
-        self.next_z = z + 1;
+        let z = self.top_z();
+        self.frames[index].layout.z = z;
         true
     }
 
@@ -364,8 +378,7 @@ impl WidgetHost {
         let y = area.y + ui_px(WIDGET_MARGIN) + step;
         f.layout.x = clampi(x - step, area.x, (area.x + area.w - f.layout.w).max(area.x));
         f.layout.y = clampi(y, area.y, (area.y + area.h - f.layout.h).max(area.y));
-        f.layout.z = self.next_z;
-        self.next_z += 1;
+        f.layout.z = self.top_z();
         self.frames.push(f);
         true
     }
@@ -378,7 +391,8 @@ impl WidgetHost {
         let mut f = WidgetFrame::new(def);
         f.layout = layout;
         f.clamp(area);
-        self.next_z = self.next_z.max(f.layout.z + 1);
+        // (the saved z may be any number: the sum stops at the largest, and `top_z` counts again from there)
+        self.next_z = self.next_z.max(f.layout.z.saturating_add(1));
         self.frames.push(f);
     }
 
@@ -653,6 +667,49 @@ mod tests {
             assert!(min_w >= floor_w && min_h >= floor_h && max_w >= min_w && max_h >= min_h);
         }
         ui_init(300.0);
+    }
+
+    #[test]
+    fn a_z_order_of_any_number_in_widgets_ini_keeps_its_order() {
+        ui_init(300.0);
+        let root = std::env::temp_dir().join(format!("grimoire-widgets-z-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(store_init(root.to_str().unwrap()), 0);
+        // A line whose z is the largest number an i32 holds, between two ordinary ones, and one with the least.
+        std::fs::write(
+            root.join("widgets.ini"),
+            "test.a=10,10,300,300,0,5,0\ntest.ini=10,10,300,300,0,2147483647,0\ntest.b=40,40,300,300,0,7,0\ntest.c=70,70,300,300,0,-2147483648,0\n",
+        )
+        .unwrap();
+        let lines = widgets_load();
+        assert_eq!(lines.iter().map(|e| e.layout.z).collect::<Vec<_>>(), [5, i32::MAX, 7, i32::MIN]);
+        static DEFS: [WidgetDef; 5] = [
+            WidgetDef { id: "test.a", ..TEST_WIDGET },
+            WidgetDef { id: "test.ini", ..TEST_WIDGET },
+            WidgetDef { id: "test.b", ..TEST_WIDGET },
+            WidgetDef { id: "test.c", ..TEST_WIDGET },
+            WidgetDef { id: "test.new", ..TEST_WIDGET },
+        ];
+        let mut h = WidgetHost::new();
+        for (e, def) in lines.iter().zip(&DEFS) {
+            h.restore(def, e.layout, area());
+        }
+        let ids = |h: &WidgetHost| h.draw_order().into_iter().map(|i| h.frames[i].def.id).collect::<Vec<_>>();
+        assert_eq!(ids(&h), ["test.c", "test.a", "test.b", "test.ini"], "drawn in the order of their numbers");
+        // What the editor does next with the frames: raise one, open another, raise each in turn. Each goes on top
+        // of the others, which keep their order, and every number stays one a sum can be made with.
+        assert!(h.raise(0));
+        assert_eq!(ids(&h), ["test.c", "test.b", "test.ini", "test.a"]);
+        assert!(h.spawn(&DEFS[4], area(), panel()));
+        assert_eq!(ids(&h), ["test.c", "test.b", "test.ini", "test.a", "test.new"]);
+        for i in [1, 3, 2, 0, 4, 1] {
+            h.raise(i);
+            assert_eq!(*ids(&h).last().unwrap(), h.frames[i].def.id);
+            assert!(h.frames.iter().all(|f| (0..1000).contains(&f.layout.z)), "{:?}", h.frames.iter().map(|f| f.layout.z).collect::<Vec<_>>());
+        }
+        assert_eq!(h.hit(100, 100).map(|(i, _)| h.frames[i].def.id), Some("test.ini"), "the frame raised last is the one a tap finds");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

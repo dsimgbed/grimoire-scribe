@@ -1585,7 +1585,9 @@ or 1), z-order, and a reserved flag (written as 0). Coordinates are screen pixel
 are. A closed widget has no line. An id here is read by the rule a manifest's `id` is checked by
 (lowercase letters, digits, dots and hyphens, at most 128 bytes, no dot first or last and no two in
 a row), so the frame of any package that installs is found again. Unknown ids and malformed lines
-are skipped. The file is at most 64 KiB, written atomically.
+are skipped. The z-order only orders the frames (a greater number is drawn over a smaller): any
+number an `i32` holds is read, and the frames are numbered again from 0, in their order, when the
+next number would pass the largest. The file is at most 64 KiB, written atomically.
 
 ```
 # Grimoire widget layout. One line per open widget:
