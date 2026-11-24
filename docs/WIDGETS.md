@@ -47,13 +47,16 @@ Settings → Packages → Widgets accepts two forms:
 | `user/repo` | GitHub: `https://api.github.com/repos/user/repo` gives the default branch, then `https://raw.githubusercontent.com/user/repo/<branch>/package.yaml` (the fallback when the API cannot be reached is `main`) |
 | `https://host/path/package.yaml` | that manifest directly; any HTTPS host works |
 
-Only `https://` is fetched, and the address may be at most 1024 characters. The GitHub API is
-unauthenticated, so a check is subject to GitHub's rate limit.
+Only `https://` is fetched, and the address may be at most 1024 characters, with no space and no
+control character in it. Every redirect an answer sends must be `https://` too, and at most five are
+followed. The address is taken as written: braces and brackets in it are part of the one address.
+The GitHub API is unauthenticated, so a check is subject to GitHub's rate limit.
 
 The artifact's URL is the manifest's directory plus `artifact.path`, unless `releases` has an entry
 for the manifest's version, in which case that entry's `url` is used. This is why a repository can
 keep its source and its built artifact in one tree, or attach the artifact to a GitHub release and
-point at it.
+point at it. The path is joined as it is written, so one with a space in it makes an address that
+is not fetched.
 
 An update re-fetches the stored install address (`source_url`). A package installed as
 `user/repo` is updated through GitHub; one installed from a full `.yaml` address is updated from
@@ -582,7 +585,8 @@ the platform matches, and that the artifact's length and SHA-256 match the manif
 not review the code and cannot tell a good widget from a malicious one. Install from sources you
 trust, and read the manifest before installing.
 
-The manifest and artifact are fetched over HTTPS. The SHA-256 protects against a truncated or
+The manifest and artifact are fetched over HTTPS, and so is every redirect on the way to them (at
+most five). The SHA-256 protects against a truncated or
 corrupted download; it is not a signature, and it comes from the same repository as the artifact.
 The check before each load compares the installed module with the digest kept in
 `packages/index.json`, a file of the same data folder: it finds a module that is no longer the file
