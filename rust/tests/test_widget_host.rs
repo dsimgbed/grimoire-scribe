@@ -236,3 +236,145 @@ fn a_package_without_the_overlay_capability_draws_nothing() {
     assert_eq!((rt.hit_count(), rt.text().as_str()), (1, "hello"));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// What a frame says once a drawing pass of its module used up its instructions: the host's words, then the
+/// interpreter's for its out-of-fuel trap. (No test here runs a module that long: the interpreter's dispatch in
+/// an unoptimized build, as the tests are, uses native stack for every instruction it runs.)
+const STOPPED: &str = "The widget stopped: all fuel consumed by WebAssembly";
+
+#[test]
+fn a_pass_at_a_limit_runs_and_one_past_it_stops_as_out_of_instructions() {
+    let root = fresh_root("limits");
+    let stopped = STOPPED.to_string();
+    let (commands, hits) = (WIDGET_PASS_COMMANDS_MAX, WIDGET_PASS_HITS_MAX);
+    let (one, all, line) = (WIDGET_TEXT_MAX as i32, WIDGET_PASS_TEXT_MAX / WIDGET_TEXT_MAX, WIDGET_STATUS_MAX as i32);
+    let state = WIDGET_STATE_MAX as i32;
+    let moves = WIDGET_CALL_STATE_MAX / WIDGET_STATE_MAX;
+    let small = rect(0, 0, 8, 8, 0);
+    let region = hit(1, 0, 0, 8, 8);
+    let label = |len: i32| text(0, 0, 200, 40, 0, len, 20, 0);
+    let key = |len: i32| button(1, 0, 0, 200, 40, 0, len, 0);
+    let join = |a: Vec<Op>, b: Vec<Op>| [a, b].concat();
+    // (name, a pass at the limit, a pass one past it)
+    let cases: Vec<(&str, Vec<Op>, Vec<Op>)> = vec![
+        ("rectangles", times(commands, small.clone()), times(commands + 1, small.clone())),
+        ("a text as the last command", join(times(commands - 1, small.clone()), label(4)), join(times(commands, small.clone()), label(4))),
+        ("a button as the last command", join(times(commands - 1, small.clone()), key(4)), join(times(commands, small.clone()), key(4))),
+        ("hit regions", times(hits, region.clone()), times(hits + 1, region.clone())),
+        ("a button as the last region", join(times(hits - 1, region.clone()), key(4)), join(times(hits, region.clone()), key(4))),
+        ("one text", label(one), label(one + 1)),
+        ("one label", key(one), key(one + 1)),
+        ("a text of every length an i32 can say", label(-1), label(i32::MAX)),
+        ("all the texts of a pass", times(all, label(one)), join(times(all, label(one)), label(1))),
+        ("all the texts, the last a label", join(times(all - 1, label(one)), key(one)), join(times(all, label(one)), key(1))),
+        ("the status line", status(0, line), status(0, line + 1)),
+        ("a status line of every length", status(0, -1), status(0, i32::MAX)),
+        ("state written", times(moves, call("state_set", &[0, state])), times(moves + 1, call("state_set", &[0, state]))),
+        (
+            "state read",
+            join(call("state_set", &[0, state]), times(moves - 1, join(call("state_get", &[0, state]), vec![Op::Drop]))),
+            join(call("state_set", &[0, state]), times(moves, join(call("state_get", &[0, state]), vec![Op::Drop]))),
+        ),
+    ];
+    for (i, (name, at, past)) in cases.into_iter().enumerate() {
+        let before = patterned(700, 600);
+        let mut c = before.clone();
+        let mut rt = installed(&format!("test.at.{i}"), &BOTH, &draws(&at));
+        for _ in 0..2 {
+            // (twice: the counts start again with each pass)
+            rt.draw(&mut c, BODY);
+            assert_eq!(rt.error(), None, "{name}: a pass at the limit runs");
+        }
+        assert_eq!(changed_outside(&before, &c, BODY), 0, "{name}");
+        let mut c = before.clone();
+        let mut rt = installed(&format!("test.past.{i}"), &BOTH, &draws(&past));
+        rt.draw(&mut c, BODY);
+        assert_eq!(rt.error(), Some(stopped.as_str()), "{name}: a pass one past the limit stops");
+        // Nothing of the stopped pass is drawn or kept, and the module is not called again.
+        assert_eq!(changed_outside(&before, &c, RECT_EMPTY), 0, "{name}");
+        assert_eq!((rt.hit_count(), rt.text().as_str(), rt.status()), (0, "", ""), "{name}");
+        rt.draw(&mut c, BODY);
+        rt.tap(4, 4);
+        assert_eq!(rt.error(), Some(stopped.as_str()), "{name}");
+        assert_eq!(changed_outside(&before, &c, RECT_EMPTY), 0, "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_limits_hold_in_a_tap_and_a_tap_leaves_nothing_for_the_next_pass() {
+    let root = fresh_root("tap-limits");
+    let before = patterned(700, 600);
+    // A tap that draws: what it recorded is dropped when the next call starts, so the pass that follows holds its
+    // own commands only and may be as long as any other.
+    let black = button(1, -50, -50, 2000, 2000, 0, 0, 1);
+    let full = times(WIDGET_PASS_COMMANDS_MAX - 1, black.clone());
+    let mut rt = installed("test.tap.draws", &BOTH, &module(&times(WIDGET_PASS_COMMANDS_MAX, rect(10, 10, 20, 20, 0)), &full, &[]));
+    let mut c = before.clone();
+    rt.draw(&mut c, BODY);
+    rt.tap(15, 15);
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), None);
+    assert_eq!(rt.hit_count(), 0, "the tap's buttons are no regions of the pass");
+    assert!(c.px[((BODY.y + 100) * c.stride + BODY.x + 100) as usize] == 255, "the tap's buttons are not drawn");
+    // A tap past a limit stops the widget as any tap that traps does.
+    let mut rt = installed("test.tap.past", &BOTH, &module(&[], &times(WIDGET_PASS_COMMANDS_MAX + 1, rect(0, 0, 8, 8, 0)), &[]));
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), None);
+    rt.tap(1, 1);
+    assert_eq!(rt.error(), Some("The widget stopped while handling a tap."));
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), Some("The widget stopped while handling a tap."));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn lengths_are_held_before_memory_is_read() {
+    let root = fresh_root("lengths");
+    let mut c = patterned(700, 600);
+    // state_set keeps the first 64 KiB of what it is given, whatever length it is told; a setting's key longer
+    // than any key is no setting's; state_get copies no more than there is.
+    let mut draw = status_is_state();
+    draw.extend(call("state_set", &[WORD_AT, i32::MAX]));
+    draw.extend(call("setting", &[0, i32::MAX, 0, 16]));
+    draw.push(Op::Drop);
+    draw.extend(call("setting", &[0, -1, 0, i32::MAX]));
+    draw.push(Op::Drop);
+    draw.extend(call("state_get", &[100, i32::MAX]));
+    draw.push(Op::Drop);
+    let mut rt = installed("test.lengths", &BOTH, &module(&draw, &[], &[(WORD_AT as u32, b"hello")]));
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), None);
+    let saved = std::fs::read(root.join("packages/widgets/test.lengths/state/runtime.bin")).unwrap();
+    // (the module's one page of memory ends before 64 KiB from the word are read: the state is what was there)
+    assert_eq!(saved.len(), 65536 - WORD_AT as usize);
+    assert!(saved.len() <= WIDGET_STATE_MAX && saved.starts_with(b"hello"));
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), None);
+    assert!(rt.status().starts_with("hello"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn request_redraw_has_a_shortest_and_a_longest_delay() {
+    use std::time::{Duration, Instant};
+    let root = fresh_root("redraw");
+    let mut c = patterned(700, 600);
+    let ms = |n: i32| Duration::from_millis(n as u64);
+    for (i, (asked, given)) in [(i32::MIN, WIDGET_REDRAW_MIN_MS), (-5, WIDGET_REDRAW_MIN_MS), (0, WIDGET_REDRAW_MIN_MS), (1, WIDGET_REDRAW_MIN_MS), (16, WIDGET_REDRAW_MIN_MS), (WIDGET_REDRAW_MIN_MS, WIDGET_REDRAW_MIN_MS), (WIDGET_REDRAW_MIN_MS + 1, WIDGET_REDRAW_MIN_MS + 1), (5000, 5000), (i32::MAX, WIDGET_REDRAW_MAX_MS)].into_iter().enumerate() {
+        let mut rt = installed(&format!("test.redraw.{i}"), &BOTH, &draws(&call("request_redraw", &[asked])));
+        let t0 = Instant::now();
+        assert!(!rt.redraw_due(t0 + ms(WIDGET_REDRAW_MAX_MS)), "nothing is asked for before the first pass");
+        rt.draw(&mut c, BODY);
+        let t1 = Instant::now();
+        assert!(!rt.redraw_due(t0 + ms(given - 1)), "request_redraw({asked}) is not due before {given} ms");
+        assert!(rt.redraw_due(t1 + ms(given)), "request_redraw({asked}) is due after {given} ms");
+    }
+    assert_eq!(WIDGET_REDRAW_MIN_MS, 100);
+    // A module that asked and then stopped is not drawn again: nothing stays due.
+    let mut rt = installed("test.redraw.stops", &BOTH, &draws(&[call("request_redraw", &[100]), times(WIDGET_PASS_COMMANDS_MAX + 1, rect(0, 0, 8, 8, 0))].concat()));
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), Some(STOPPED));
+    assert!(!rt.redraw_due(Instant::now() + ms(WIDGET_REDRAW_MAX_MS)));
+    let _ = std::fs::remove_dir_all(&root);
+}

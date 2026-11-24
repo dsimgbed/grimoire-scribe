@@ -1711,15 +1711,16 @@ now() -> i64
 Coordinates are screen pixels inside the frame body, and the body is all a module draws on: a
 command is clipped to it, and a hit region is the part of it inside the body. `style` is `0` normal,
 `1` selected or `2` disabled. Strings are UTF-8 in the module's memory. `request_redraw` names the delay before the
-host draws the widget again (16 ms to 24 hours), for a clock or a countdown. `setting` returns the bytes written for one of
+host draws the widget again (100 ms to 24 hours), for a clock or a countdown. `setting` returns the bytes written for one of
 the package's saved settings (empty when it is missing); `state_get`/`state_set` read and write the
 widget's saved state in `packages/widgets/<id>/state/runtime.bin`, capped at 64 KiB. `status` sets
 the text read back by the editor's `editor.widget.N.status` probe. A module is given only what the
 manifest's `capabilities` declare: `editor:overlay` for `rect`, `text`, `button` and `hit`, and
 `storage:widget-local` for `state_get`, `state_set` and `state/runtime.bin`; a call without its
 capability does nothing (`state_get` returns 0), and no state file is read or written. Each call has a fixed instruction
-budget and linear memory is capped at 32 MiB, so a looping or greedy widget stops with an error
-instead of freezing the device.
+budget and linear memory is capped at 32 MiB, and a drawing pass holds at most 512 commands, 512
+hit regions and 16 KiB of text (the whole list is in WIDGETS.md, Limits), so a looping or greedy
+widget stops with an error instead of freezing the device.
 
 [WIDGETS.md](WIDGETS.md#the-wasm-abi) is the guide to writing one.
 

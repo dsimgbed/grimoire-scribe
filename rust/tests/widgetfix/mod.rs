@@ -25,8 +25,6 @@ pub enum Op {
     Add,
     /// i32.store8: the value on top to the address under it
     Store8,
-    /// a loop that never ends
-    Forever,
 }
 
 /// The ABI's imports in the order a module here imports them (a function's index), each with its type's index.
@@ -102,7 +100,6 @@ fn body(ops: &[Op]) -> Vec<u8> {
             Op::Drop => code.push(0x1a),
             Op::Add => code.push(0x6a),
             Op::Store8 => code.extend_from_slice(&[0x3a, 0x00, 0x00]),
-            Op::Forever => code.extend_from_slice(&[0x03, 0x40, 0x0c, 0x00, 0x0b]),
         }
     }
     code.push(0x0b);
@@ -167,7 +164,7 @@ pub fn module(draw: &[Op], tap: &[Op], data: &[(u32, &[u8])]) -> Vec<u8> {
     out
 }
 
-fn call(import: &'static str, args: &[i32]) -> Vec<Op> {
+pub fn call(import: &'static str, args: &[i32]) -> Vec<Op> {
     let mut v: Vec<Op> = args.iter().map(|&a| Op::I(a)).collect();
     v.push(Op::Call(import));
     v
@@ -256,12 +253,29 @@ pub fn keeps() -> Vec<u8> {
     module(&draw, &tap_saves_id(), &[(WORD_AT as u32, b"hello")])
 }
 
+/// The steps of `ops`, `n` times over.
+pub fn times(n: usize, ops: Vec<Op>) -> Vec<Op> {
+    (0..n).flat_map(|_| ops.clone()).collect()
+}
+
+/// A module whose `widget_draw` runs `draw` and whose `widget_tap` does nothing.
+pub fn draws(draw: &[Op]) -> Vec<u8> {
+    module(draw, &[], &[])
+}
+
+/// A module that draws `n` small rectangles in a pass, side by side.
+pub fn many(n: usize) -> Vec<u8> {
+    draws(&(0..n as i32).flat_map(|i| rect(i % 32 * 10, i / 32 * 10, 8, 8, 0)).collect::<Vec<_>>())
+}
+
 /// The packages of tests/fixtures/widgethost, in the order of its index.
 pub fn packages() -> Vec<Package> {
     vec![
         package("test.host.wide", "Wide", &BOTH, FIXED_400_300, wide()),
         // (the same module, in a package that declares no capability)
         package("test.host.plain", "Plain", &[], FIXED_400_300, wide()),
+        // (one drawing command more than a pass may hold: 513)
+        package("test.host.many", "Many", &BOTH, FIXED_400_300, many(513)),
     ]
 }
 

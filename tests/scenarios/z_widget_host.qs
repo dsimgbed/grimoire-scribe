@@ -71,4 +71,19 @@ expect editor.widget.0.hits is 0
 tap panel widget.0.close
 wait 300
 expect editor.widgets is 0
+# Many draws 513 rectangles in a pass, one more than a pass may hold: the pass is stopped as one that used up its
+# instructions is, none of it is drawn, and the frame says that the widget stopped.
+tap panel widgets
+wait 300
+tap panel widgets.test.host.many
+wait 400
+expect editor.widgets is 1 test.host.many
+expect editor.widget.0.error is The widget stopped: all fuel consumed by WebAssembly
+expect editor.widget.0.hits is 0
+expect editor.widget.0.text is
+shot 04-many
+# (the frame is still a frame: it closes)
+tap panel widget.0.close
+wait 300
+expect editor.widgets is 0
 quit

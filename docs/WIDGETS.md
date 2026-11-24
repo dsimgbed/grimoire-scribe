@@ -277,14 +277,15 @@ body, is a tap on no region.
 | `button` | a button with its own label; it is also a hit region with `id` |
 | `hit` | a hit region with `id`, without drawing anything |
 | `status` | the text the editor's `editor.widget.N.status` probe reads, for tests and debugging |
-| `request_redraw` | asks for `widget_draw` again after `after_ms` (16 to 86,400,000); a clock calls it once per draw, and a package that never calls it is only drawn when something else repaints |
+| `request_redraw` | asks for `widget_draw` again after `after_ms` (100 to 86,400,000; a value outside is taken as the nearer end); a clock calls it once per draw, and a package that never calls it is only drawn when something else repaints |
 | `setting` | copies one saved setting's value into `out_ptr` and returns its byte length, or `0`; `out_cap` caps the copy |
 | `state_get` | copies the saved state into `ptr` and returns its byte length, or `0`; `cap` caps the copy. `state_get` and `state_set` need `storage:widget-local` |
-| `state_set` | replaces the saved state with the bytes at `ptr`; at most 64 KiB is kept |
+| `state_set` | replaces the saved state with the bytes at `ptr`; the first 64 KiB are kept |
 | `now` | Unix time in seconds, when a widget needs a clock |
 
 `widget_tap` is called with the `id` of the hit region under the tap, or `-1` for a tap elsewhere
-in the body. It should update the package's state; the next `widget_draw` shows the result. A
+in the body. It should update the package's state; the next `widget_draw` shows the result (what
+a tap itself draws is not shown: a pass holds the commands of its own `widget_draw` only). A
 module may call `state_set` during a tap or a draw; the host writes the state file after the call,
 at `packages/widgets/<id>/state/runtime.bin`. For a timer or a sticky note, that is the whole
 persistence model.
@@ -293,6 +294,36 @@ Each call runs with a fixed instruction budget, and a module's linear memory may
 32 MiB. A module that loops past the budget is stopped and its frame shows the error instead of
 freezing Grimoire. Imports outside the `grimoire` module fail to link, and the module has no
 filesystem, network or process access.
+
+### Limits
+
+The host calls a module's `widget_draw` (a drawing pass) and its `widget_tap`. Each call is held to
+the limits below, and the counts start again with every call:
+
+| limit | |
+|---|---|
+| instructions in one call | 20,000,000 |
+| the module's memory | 32 MiB |
+| drawing commands in one pass (`rect`, `text` and `button` together) | 512 |
+| hit regions in one pass (`button` and `hit` together) | 512 |
+| bytes of one text (a `text`'s, or a `button`'s label) | 1,024 |
+| bytes of all the texts of one pass | 16,384 (16 KiB) |
+| bytes of the status line | 256 |
+| bytes `state_get` and `state_set` move in one call, all their uses together | 1,048,576 (1 MiB) |
+| the saved state | 65,536 bytes (64 KiB): `state_set` keeps the first 64 KiB of what it is given |
+| a text's height, `px` | 1 to 512; a value outside is drawn at the nearer end |
+| `request_redraw`'s delay | 100 ms to 86,400,000 ms (24 hours); a value outside is taken as the nearer end, so a package has itself drawn again at most ten times a second |
+| a key passed to `setting` | 64 bytes, the longest a setting's key can be; a longer one is no setting's and returns `0` |
+
+A length is compared with its limit before the host reads the module's memory. A call that goes past
+the command, hit region, text, status line or state limit is stopped the way a call that runs past
+its instruction budget is: the frame shows the same error in place of its body, the module is not
+called again until the frame is closed and opened, and Grimoire's log names the limit. Memory
+past 32 MiB is not given: `memory.grow` fails, as WebAssembly defines it.
+
+The limits leave room. The calculator package of `tests/fixtures/widgetcalc/` draws at most 39
+commands, 37 hit regions and 118 bytes of text in a pass, with a status line of 47 bytes, in about
+180,000 instructions.
 
 A module must be self-contained: the same bytes run on every supported Scribe, so there is nothing
 to cross-compile for armv7. A Rust `cdylib` built for `wasm32-unknown-unknown` with `extern "C"`
