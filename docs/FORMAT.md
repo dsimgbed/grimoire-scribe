@@ -1690,7 +1690,10 @@ host's `settings.json` in that folder is kept too; a package should use another 
 
 `spec.runtime` must be `wasm`: a package ships behavior as a WebAssembly module, and Grimoire carries
 no widget implementations of its own. A native runtime or entry is refused. The artifact is size-
-and SHA-256-checked at install, then instantiated in the frame when it first draws.
+and SHA-256-checked at install. Each time a frame loads it, it is checked again before it is
+instantiated: the index's `path` must be the installed manifest's `artifact.path` under the
+package's folder, the file a plain file there with no link on the way, and its SHA-256 the index's
+`sha`; a file that fails is not loaded.
 
 A module exports `memory`, `widget_draw(width, height, scale_milli)` and
 `widget_tap(hit_id)`, and imports from the `grimoire` module:

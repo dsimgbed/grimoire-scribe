@@ -219,16 +219,18 @@ pub fn manifest(id: &str, name: &str, capabilities: &[&str], size: &str, artifac
 pub const FIXED_400_300: &str = "    mode: fixed\n    default: [400, 300]\n";
 pub const BOTH: [&str; 2] = ["editor:overlay", "storage:widget-local"];
 
-/// A package of the scenarios' data root: its id, name, manifest and module.
+/// A package of the scenarios' data root: its id, name, manifest and module, and the SHA-256 its index entry
+/// records (the module's own, but for the package made to differ).
 pub struct Package {
     pub id: &'static str,
     pub name: &'static str,
     pub manifest: String,
     pub module: Vec<u8>,
+    pub recorded: String,
 }
 
 fn package(id: &'static str, name: &'static str, capabilities: &[&str], size: &str, module: Vec<u8>) -> Package {
-    Package { id, name, manifest: manifest(id, name, capabilities, size, &module), module }
+    Package { id, name, manifest: manifest(id, name, capabilities, size, &module), recorded: sha256_of(&module), module }
 }
 
 /// A module that draws far outside its body: a selected (black) button from far above and left of the body to
@@ -276,6 +278,8 @@ pub fn packages() -> Vec<Package> {
         package("test.host.plain", "Plain", &[], FIXED_400_300, wide()),
         // (one drawing command more than a pass may hold: 513)
         package("test.host.many", "Many", &BOTH, FIXED_400_300, many(513)),
+        // (its file is not the one its install recorded: the index has another module's SHA-256)
+        Package { recorded: sha256_of(&keeps()), ..package("test.host.changed", "Changed", &BOTH, FIXED_400_300, wide()) },
     ]
 }
 
@@ -290,7 +294,7 @@ pub fn scenario_files() -> Vec<(String, Vec<u8>)> {
             "{{\"id\":\"{}\",\"name\":\"{}\",\"version\":\"1.0.0\",\"author\":\"Grimoire tests\",\"description\":\"A module of the widget host's tests.\",\"icon\":\"\",\"path\":\"{dir}/module.bin\",\"sha\":\"{}\",\"installed_at\":1,\"source_url\":\"\"}}",
             p.id,
             p.name,
-            sha256_of(&p.module),
+            p.recorded,
         ));
         files.push((format!("{dir}/package.yaml"), p.manifest.clone().into_bytes()));
         files.push((format!("{dir}/module.bin"), p.module.clone()));

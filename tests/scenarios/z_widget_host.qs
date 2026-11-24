@@ -86,4 +86,19 @@ shot 04-many
 tap panel widget.0.close
 wait 300
 expect editor.widgets is 0
+# Changed is a package whose module is not the file its install recorded (the index holds another SHA-256): the
+# file is not loaded, and the frame says that it could not be read.
+tap panel widgets
+wait 300
+tap panel widgets.test.host.changed
+wait 400
+expect editor.widgets is 1 test.host.changed
+expect editor.widget.0.error is The widget's artifact could not be read.
+expect editor.widget.0.hits is 0
+# (its module is Wide's, which fills the body with black when it runs)
+expect display.dark.1290.100.372.214 not 79608
+shot 05-changed
+tap panel widget.0.close
+wait 300
+expect editor.widgets is 0
 quit

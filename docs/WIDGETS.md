@@ -119,7 +119,7 @@ spec:
 | `repository` | optional; the human-facing project address. A GitHub address also gets **View QR code** in the detail page |
 | `capabilities` | optional; `editor:overlay` (the widget draws in its frame) and `storage:widget-local` (it keeps saved state) are the two there are, and any other value is refused. A module is given only what is declared here: see [Capabilities](#capabilities). The ABI itself has no network, filesystem or process access; a module can reach only the frame, its settings and its own state |
 | `settings` | optional; up to 32 settings the package declares for its own Settings page. Each has a `key`, a `label`, a `type` (`toggle` or `choice`), and a `default`; a choice also has 2 to 16 `choices`. An optional `icon` names one of the icons above |
-| `artifact.path` | required; a safe relative path, at most 240 bytes: no leading `/`, no backslash, no empty, `.` or `..` component, and neither `package.yaml` nor anything under `state/` |
+| `artifact.path` | required; a safe relative path, at most 240 bytes: no leading `/`, no backslash, no empty, `.` or `..` component, and neither `package.yaml` nor anything under `state/`. No component begins with a dot, or ends in a dot, a space or `.sdr`, and the first is not the name of one of the storage's system folders (`system`, `extensions` and the like): the module is read through the walk Grimoire reads the Kindle's storage with, which takes no such name |
 | `artifact.sha256` | required; 64 hexadecimal characters, over the artifact's bytes |
 | `artifact.size` | required; the artifact's size in bytes, at least 1 and at most 32 MiB. It is used even when `releases` supplies the URL and digest |
 | `releases` | optional; `version`, `url` (use HTTPS) and `sha256` per entry. Only the entry whose `version` equals the manifest's is used |
@@ -337,6 +337,18 @@ and SHA-256 against the manifest, and only then writes anything. A mismatch refu
 with nothing changed. There is no signature and no inspection beyond that check; the module is
 first instantiated when its frame opens.
 
+Each time a frame opens, before the module is loaded, its file is checked again:
+
+- the installed manifest's `artifact.path` is still a path the manifest check takes, and the index
+  (`packages/index.json`) names the same file, `packages/widgets/<id>/<artifact.path>`;
+- it is a plain file inside the package's own folder, with no link in its place or on the way to it;
+- it is no larger than 32 MiB, and its SHA-256 is the `sha` the index recorded when the package was
+  installed.
+
+A file that fails a check is not loaded: the frame says "The widget's artifact could not be read."
+in place of its body, and Grimoire's log says which check it was. The file is read and hashed once
+for each load, which is once for a frame that opens; drawing does not read it again.
+
 `tests/fixtures/widgetcalc/` holds a compiled calculator package used by the scenarios;
 `tests/fixtures/widgetpkg/` holds a small package used for the install-path checks. Neither is
 built by Grimoire's build, and neither adds code to Grimoire itself.
@@ -420,7 +432,9 @@ cp -r path/to/my-timer /tmp/mypkg/packages/widgets/com.example.timer
 ```
 
 The entry's `path` is relative to the data root (`packages/widgets/<id>/<artifact.path>`), `sha` is
-the installed artifact's digest, and `source_url` is the address an update should re-fetch. Then
+the installed artifact's digest, and `source_url` is the address an update should re-fetch. Both
+`path` and `sha` are checked when the frame opens (see [The artifact](#the-artifact)): with a `sha`
+that is not the file's SHA-256 the module is not loaded. Then
 run a scenario with `# copy: /tmp/mypkg .` (or copy it to `GRIMOIRE_ROOT` yourself) and inspect the
 shots:
 
@@ -484,7 +498,10 @@ trust, and read the manifest before installing.
 
 The manifest and artifact are fetched over HTTPS. The SHA-256 protects against a truncated or
 corrupted download; it is not a signature, and it comes from the same repository as the artifact.
-There is no package signing and no revocation list.
+The check before each load compares the installed module with the digest kept in
+`packages/index.json`, a file of the same data folder: it finds a module that is no longer the file
+that was installed, and it is not a signature either. There is no package signing and no revocation
+list.
 
 A widget is confined to its frame, its settings and its own state file. The module has no network,
 filesystem or process access; the only files the host touches for it are the artifact it was

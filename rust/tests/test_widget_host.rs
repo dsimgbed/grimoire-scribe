@@ -378,3 +378,107 @@ fn request_redraw_has_a_shortest_and_a_longest_delay() {
     assert!(!rt.redraw_due(Instant::now() + ms(WIDGET_REDRAW_MAX_MS)));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// What a frame says when its module's file fails the check before a load.
+const NOT_READ: &str = "The widget's artifact could not be read.";
+
+/// The error of a load of the package, None when it loads.
+fn load(id: &str) -> Option<String> {
+    WidgetRuntime::new(id).err()
+}
+
+/// A file of the data root with `from` replaced by `to`, as a hand with an editor would.
+fn rewrite(path: &std::path::Path, from: &str, to: &str) {
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(text.contains(from), "{from} in {path:?}");
+    std::fs::write(path, text.replace(from, to)).unwrap();
+}
+
+#[test]
+fn a_module_is_checked_again_before_each_load() {
+    use std::os::unix::fs::symlink;
+    let root = fresh_root("load");
+    let (module, other) = (keeps(), wide());
+    drop(installed("test.load", &BOTH, &module));
+    let dir = root.join("packages/widgets/test.load");
+    let (file, yaml, index) = (dir.join("module.bin"), dir.join("package.yaml"), root.join("packages/index.json"));
+    assert_eq!(load("test.load"), None);
+
+    // The file's bytes are not the ones installed: one bit changed, another module, nothing, no file.
+    let mut bit = module.clone();
+    *bit.last_mut().unwrap() ^= 1;
+    for bytes in [&bit[..], &other[..], &[][..]] {
+        std::fs::write(&file, bytes).unwrap();
+        assert_eq!(load("test.load").as_deref(), Some(NOT_READ));
+    }
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(load("test.load").as_deref(), Some(NOT_READ));
+
+    // A link in the file's place is not followed, whether it leads to the same bytes inside the folder or outside.
+    let (inside, outside) = (dir.join("copy.bin"), root.join("packages/widgets/elsewhere.bin"));
+    std::fs::write(&inside, &module).unwrap();
+    std::fs::write(&outside, &module).unwrap();
+    for target in [std::path::Path::new("copy.bin"), &inside, &outside] {
+        symlink(target, &file).unwrap();
+        assert_eq!(load("test.load").as_deref(), Some(NOT_READ), "a link to {target:?}");
+        std::fs::remove_file(&file).unwrap();
+    }
+    std::fs::write(&file, &module).unwrap();
+    assert_eq!(load("test.load"), None);
+
+    // The installed manifest names another file: outside the folder, by an absolute path, the manifest, the state,
+    // a name the walk does not take, or a file of the folder that the index does not name.
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::write(dir.join("state/runtime.bin"), &module).unwrap();
+    std::fs::write(dir.join(".module.bin"), &module).unwrap();
+    let absolute = outside.to_str().unwrap().to_string();
+    for path in ["../elsewhere.bin", "./module.bin", "x/../module.bin", absolute.as_str(), "/module.bin", "package.yaml", "state/runtime.bin", ".module.bin", "copy.bin", ""] {
+        rewrite(&yaml, "path: module.bin", &format!("path: {path}"));
+        assert_eq!(load("test.load").as_deref(), Some(NOT_READ), "artifact.path: {path}");
+        rewrite(&yaml, &format!("path: {path}"), "path: module.bin");
+    }
+    // (the index and the manifest naming that file together, as an install writes them, load it)
+    rewrite(&yaml, "path: module.bin", "path: copy.bin");
+    rewrite(&index, "test.load/module.bin", "test.load/copy.bin");
+    assert_eq!(load("test.load"), None);
+    rewrite(&yaml, "path: copy.bin", "path: module.bin");
+    assert_eq!(load("test.load").as_deref(), Some(NOT_READ), "the index names another file than the manifest");
+    rewrite(&index, "test.load/copy.bin", "test.load/module.bin");
+    assert_eq!(load("test.load"), None);
+
+    // The index's record of the file: another digest, none, and the same one in capitals.
+    let sha = grimoire::sha256::sha256_of(&module);
+    for (recorded, loads) in [(grimoire::sha256::sha256_of(&other), false), (String::new(), false), (sha[..63].to_string(), false), (sha.to_uppercase(), true)] {
+        rewrite(&index, &format!("\"sha\":\"{sha}\""), &format!("\"sha\":\"{recorded}\""));
+        assert_eq!(load("test.load").is_none(), loads, "sha {recorded}");
+        rewrite(&index, &format!("\"sha\":\"{recorded}\""), &format!("\"sha\":\"{sha}\""));
+    }
+
+    // A folder on the way to the file, and the package's own folder, replaced by a link to one with the same files.
+    let m = manifest("test.deep", "Test", &BOTH, FIXED_400_300, &module).replace("path: module.bin", "path: dist/module.bin");
+    widget_package_install(&m, &module, "", 1860, 2480).unwrap();
+    assert_eq!(load("test.deep"), None);
+    let deep = root.join("packages/widgets/test.deep");
+    std::fs::rename(deep.join("dist"), deep.join("real")).unwrap();
+    symlink("real", deep.join("dist")).unwrap();
+    assert_eq!(load("test.deep").as_deref(), Some(NOT_READ), "a folder of the path is a link");
+    std::fs::remove_file(deep.join("dist")).unwrap();
+    std::fs::rename(deep.join("real"), deep.join("dist")).unwrap();
+    assert_eq!(load("test.deep"), None);
+    std::fs::rename(&deep, root.join("packages/widgets/moved")).unwrap();
+    symlink("moved", &deep).unwrap();
+    assert!(load("test.deep").is_some(), "the package's folder is a link");
+    std::fs::remove_file(&deep).unwrap();
+    std::fs::rename(root.join("packages/widgets/moved"), &deep).unwrap();
+    assert_eq!(load("test.deep"), None);
+
+    // The check is the load's: a frame that has loaded its module draws without reading the file again.
+    let mut rt = WidgetRuntime::new("test.load").unwrap();
+    std::fs::write(&file, &other).unwrap();
+    let mut c = patterned(700, 600);
+    rt.draw(&mut c, BODY);
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.error(), None);
+    assert_eq!(load("test.load").as_deref(), Some(NOT_READ), "the next load checks it");
+    let _ = std::fs::remove_dir_all(&root);
+}

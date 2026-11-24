@@ -56,8 +56,7 @@ const STATE_FILE: &str = "state/runtime.bin";
 // call, a count or a length is compared with its limit before the module's memory is read, and a
 // call that goes past one is stopped as a call that used up its instructions is (`past`).
 
-/// The module's file.
-const ARTIFACT_MAX: usize = 32 * 1024 * 1024;
+// (The module's file is at most WIDGET_PKG_ARTIFACT_MAX, widgetpkg.rs.)
 /// A widget's linear memory may not grow past this, so one package cannot exhaust the device.
 const MEMORY_MAX: usize = 32 * 1024 * 1024;
 /// A widget gets this many instructions per call. A drawing pass that needs more is looping.
@@ -135,16 +134,14 @@ impl std::fmt::Debug for WidgetRuntime {
 }
 
 impl WidgetRuntime {
-    /// Compiles and instantiates the installed package's artifact.
+    /// Compiles and instantiates the installed package's artifact, once its file has been checked again
+    /// (`widget_package_artifact`: a plain file inside the package's folder, with the SHA-256 recorded at
+    /// the install). A frame loads its module once, when it first draws.
     pub fn new(id: &str) -> Result<Self, String> {
-        let Some(m) = crate::widgetpkg::widget_package_installed_manifest(id) else {
-            return Err("The widget package is not installed.".into());
-        };
+        let (m, bytes) = crate::widgetpkg::widget_package_artifact(id)?;
         if m.spec.runtime != "wasm" {
             return Err("This package is not a WebAssembly widget.".into());
         }
-        let path = format!("{}/{}", crate::widgetpkg::widget_package_dir(id), m.artifact.path);
-        let bytes = read_file_max(&path, ARTIFACT_MAX).ok_or("The widget's artifact could not be read.")?;
         let mut config = Config::default();
         config.consume_fuel(true);
         let engine = Engine::new(&config);

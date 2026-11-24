@@ -718,6 +718,18 @@ fn path_ok(p: &str) -> bool {
 pub const WIDGET_CAP_OVERLAY: &str = "editor:overlay";
 pub const WIDGET_CAP_STORAGE: &str = "storage:widget-local";
 
+/// Whether `artifact.path` may name a package's module: a relative path inside the package's folder (`path_ok`)
+/// that is neither the manifest nor anything of `state/`, and whose names the storage walk takes
+/// (`StoragePath::walked`), since the module is read through that walk when it is loaded. The manifest check and
+/// the load ask this one question, so a path that installs is a path that loads.
+fn artifact_path_ok(p: &str) -> bool {
+    path_ok(p)
+        && p != "package.yaml"
+        && p != "state"
+        && !p.starts_with("state/")
+        && crate::fsview::StoragePath::new(p.as_bytes()).is_some_and(|sp| sp.walked())
+}
+
 fn cap_ok(c: &str) -> bool {
     c == WIDGET_CAP_OVERLAY || c == WIDGET_CAP_STORAGE
 }
@@ -767,11 +779,7 @@ pub fn widget_package_validate(p: &WidgetPackage, canvas_w: i32, canvas_h: i32) 
     if p.spec.runtime != "wasm" {
         return Err("`spec.runtime` must be `wasm`; Grimoire does not run native widget code".into());
     }
-    if !path_ok(&p.artifact.path)
-        || p.artifact.path == "package.yaml"
-        || p.artifact.path == "state"
-        || p.artifact.path.starts_with("state/")
-    {
+    if !artifact_path_ok(&p.artifact.path) {
         return Err("`artifact.path` is not a safe relative path (it cannot be package.yaml or inside state/)".into());
     }
     if !sha_ok(&p.artifact.sha256) {
@@ -989,6 +997,56 @@ fn parse_installed(p: &WidgetInstall) -> Option<WidgetPackage> {
     let text = String::from_utf8_lossy(&data);
     let m = widget_package_parse(&text).ok()?;
     (m.id == p.id).then_some(m)
+}
+
+/// An installed package's manifest and its module's bytes, for a load (widgetwasm.rs). The file is checked again
+/// here, each time a frame loads it, and it is read only if every check holds:
+///
+/// - the installed manifest's `artifact.path` is one the manifest check takes (`artifact_path_ok`), and the
+///   index names the same file (`packages/widgets/<id>/<artifact.path>`);
+/// - it is a plain file inside the package's own folder, reached with no link on the way: the folder and each
+///   part of the path opened with O_NOFOLLOW from the one before, on the folder's device (fsview's walk);
+/// - it is no larger than an artifact may be, and its SHA-256 is the one the index recorded at the install.
+///
+/// One read and one SHA-256 of the file a load. What failed goes to the log; the frame says that the artifact
+/// could not be read.
+pub fn widget_package_artifact(id: &str) -> Result<(WidgetPackage, Vec<u8>), String> {
+    use std::io::Read;
+    let installed = || "The widget package is not installed.".to_string();
+    let it = widget_package_installed(id).ok_or_else(installed)?;
+    let m = parse_installed(&it).ok_or_else(installed)?;
+    let refused = |why: &str| {
+        qlog!("widget %s: its module is not loaded: %s", id, why);
+        "The widget's artifact could not be read.".to_string()
+    };
+    if !artifact_path_ok(&m.artifact.path) {
+        return Err(refused("the installed manifest's artifact.path is not a path inside the package's folder"));
+    }
+    if it.path != format!("{}/{}/{}", WIDGET_PKG_DIR, id, m.artifact.path) {
+        return Err(refused("the index and the installed manifest name different files"));
+    }
+    if !sha_ok(&it.sha) {
+        return Err(refused("the index holds no SHA-256 for it"));
+    }
+    let file = crate::fsview::StoragePath::new(m.artifact.path.as_bytes())
+        .and_then(|sp| crate::fsview::FsStorage::open(&widget_package_dir(id), &root()).ok()?.open_file(&sp, false).ok())
+        .ok_or_else(|| refused("it is not a plain file inside the package's folder, reached without a link"))?;
+    let mut file = std::fs::File::from(file);
+    let len = file.metadata().map_err(|_| refused("it cannot be read"))?.len();
+    if len > WIDGET_PKG_ARTIFACT_MAX {
+        return Err(refused("it is larger than an artifact may be"));
+    }
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(len as usize).is_err() || file.by_ref().take(WIDGET_PKG_ARTIFACT_MAX + 1).read_to_end(&mut bytes).is_err() {
+        return Err(refused("it cannot be read"));
+    }
+    if bytes.len() as u64 > WIDGET_PKG_ARTIFACT_MAX {
+        return Err(refused("it is larger than an artifact may be"));
+    }
+    if !sha256_of(&bytes).eq_ignore_ascii_case(&it.sha) {
+        return Err(refused("its SHA-256 is not the one recorded when the package was installed"));
+    }
+    Ok((m, bytes))
 }
 
 /// The installed packages whose manifest still reads and whose device is supported.
@@ -1701,6 +1759,14 @@ spec:
             (good.replace("capabilities: [editor:overlay, storage:widget-local]", "capabilities: [net]"), "Unknown capability"),
             (good.replace("path: dist/widget.bin", "path: package.yaml"), "safe relative path"),
             (good.replace("path: dist/widget.bin", "path: state/widget.bin"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: ../widget.bin"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: /dist/widget.bin"), "safe relative path"),
+            // (names the storage walk does not take: the module is read through it when a frame loads it)
+            (good.replace("path: dist/widget.bin", "path: .dist/widget.bin"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: dist/.widget.bin"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: dist./widget.bin"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: widget.sdr/widget.bin"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: system/widget.bin"), "safe relative path"),
             (good.replace("runtime: wasm", "runtime: native"), "must be `wasm`"),
         ] {
             let p = widget_package_parse(&bad).unwrap();
