@@ -553,8 +553,9 @@ pub fn status_tapped() -> bool {
 }
 
 /// Whether painting the corner must hold its refreshes back: the pen is near, a stroke or another
-/// gesture is in progress, or the driver is in pen mode.
-fn status_busy(a: &App) -> bool {
+/// gesture is in progress, or the driver is in pen mode. A widget frame's due redraw waits by the same
+/// rule (editor.rs, widget_runtime_tick).
+pub fn status_busy(a: &App) -> bool {
     with(|s| s.pen_near) || editor_busy(a) || display_pen_mode_on()
 }
 
