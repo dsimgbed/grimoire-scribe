@@ -246,6 +246,33 @@ fn a_package_without_the_overlay_capability_draws_nothing() {
     rt.draw(&mut c, BODY);
     assert_ne!(inked(&c, BODY), 0);
     assert_eq!((rt.hit_count(), rt.text().as_str()), (1, "hello"));
+    // Each of the four drawing imports on its own, in a package without the capability: a rectangle, a text, a
+    // button and a hit region each leave the body empty and the frame without a region or a text.
+    let alone: [(&str, Vec<Op>); 4] = [
+        ("rect", rect(10, 10, 200, 80, 1)),
+        ("text", text(10, 10, 200, 80, WORD_AT, 5, 60, 0)),
+        ("button", button(1, 10, 10, 200, 80, WORD_AT, 5, 1)),
+        ("hit", hit(1, 10, 10, 200, 80)),
+    ];
+    for (import, ops) in &alone {
+        let one = module(ops, &[], &[(WORD_AT as u32, b"hello")]);
+        for (kind, capabilities) in [("none", &[][..]), ("storage", &["storage:widget-local"][..])] {
+            let mut rt = installed_earlier(&format!("test.alone.{kind}.{import}"), capabilities, &one);
+            let before = patterned(700, 600);
+            let mut c = before.clone();
+            rt.draw(&mut c, BODY);
+            assert_eq!(rt.error(), None, "{import}, {kind}");
+            assert_eq!((inked(&c, BODY), rt.hit_count(), rt.text().as_str()), (0, 0, ""), "{import}, {kind}");
+            assert_eq!(rt.hit(1), None, "{import}, {kind}");
+            assert_eq!(changed_outside(&before, &c, BODY), 0, "{import}, {kind}");
+            assert_eq!(rt.bytes_read(), 0, "{import}, {kind}: nothing is read for a call that does nothing");
+        }
+        // (with the capability the same call draws, or is a region)
+        let mut rt = installed(&format!("test.alone.both.{import}"), &BOTH, &one);
+        let mut c = patterned(700, 600);
+        rt.draw(&mut c, BODY);
+        assert!(inked(&c, BODY) > 0 || rt.hit(1).is_some(), "{import}");
+    }
     // A drawing pass is asked for with the same capability: without it request_redraw brings none, ever.
     let ever = WIDGET_REDRAW_MAX_MS as u32;
     for (id, capabilities, asked) in [("test.asks.bare", &[][..], false), ("test.asks.storage", &["storage:widget-local"][..], false), ("test.asks.overlay", &["editor:overlay"][..], true)] {
@@ -520,6 +547,74 @@ fn request_redraw_has_a_shortest_and_a_longest_delay() {
 /// the interpreter counts some tens of instructions more or less for the numbers a function holds.)
 fn near(charged: u64, expected: u64, what: &str) {
     assert!(charged.abs_diff(expected) <= 64, "charged {charged}, expected {expected} {what}");
+}
+
+/// The canvas after one pass, on the largest body, of a module that draws one letter `px` high.
+fn letter_at(id: &str, px: i32) -> Canvas {
+    let mut rt = installed(id, &BOTH, &module(&text(0, 0, 1274, 1650, 0, 1, px, 0), &[], &[(0, b"W")]));
+    let mut c = patterned(1860, 2480);
+    rt.draw(&mut c, LARGEST_BODY);
+    assert_eq!(rt.error(), None, "{id}");
+    c
+}
+
+#[test]
+fn a_text_is_drawn_at_most_512_px_high() {
+    let root = fresh_root("px");
+    assert_eq!(WIDGET_TEXT_PX_MAX, 512);
+    let (at, under) = (letter_at("test.px.at", 512), letter_at("test.px.under", 511));
+    assert!(inked(&at, LARGEST_BODY) > 10_000, "a letter 512 px high is drawn");
+    assert!(at.px != under.px, "511 px is another size than 512");
+    // One pixel past the height, and any height past it, is drawn as 512 is, pixel for pixel.
+    for (id, px) in [("test.px.past", 513), ("test.px.double", 1024), ("test.px.far", 100_000), ("test.px.most", MAX)] {
+        assert!(letter_at(id, px).px == at.px, "a text {px} px high is drawn as one 512 px high");
+    }
+    // The least height is 1: nothing under it is another size.
+    let one = letter_at("test.px.one", 1);
+    for (id, px) in [("test.px.zero", 0), ("test.px.minus", -40), ("test.px.least", MIN)] {
+        assert!(letter_at(id, px).px == one.px, "a text {px} px high is drawn as one 1 px high");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_host_reads_no_more_of_a_modules_memory_than_a_limit_lets_it() {
+    let root = fresh_root("reads");
+    let mut c = patterned(700, 600);
+    // (two pages of memory, so that a length past a limit still lies in the memory: what is read is the limit's)
+    let mut read = |id: &str, capabilities: &[&str], draw: Vec<Op>| {
+        let mut w = Wasm::new(code(&draw));
+        w.memories = vec![(2, None)];
+        let mut rt = installed_earlier(&format!("test.reads.{id}"), capabilities, &w.bytes());
+        rt.draw(&mut c, BODY);
+        (rt.error().map(str::to_string), rt.bytes_read())
+    };
+    let (page, both) = (65536, &BOTH[..]);
+    let dropped = |import: &'static str, args: &[i32]| [call(import, args), vec![Op::Drop]].concat();
+    // state_set keeps the first 64 KiB of what it is given, and reads those alone, however long it is told.
+    assert_eq!(read("state.kept", both, call("state_set", &[0, 100])), (None, 100));
+    assert_eq!(read("state.all", both, call("state_set", &[0, page])), (None, WIDGET_STATE_MAX));
+    assert_eq!(read("state.more", both, call("state_set", &[0, 2 * page])), (None, WIDGET_STATE_MAX));
+    assert_eq!(read("state.most", both, call("state_set", &[0, MAX])), (None, WIDGET_STATE_MAX));
+    assert_eq!(read("state.none", &["editor:overlay"], call("state_set", &[0, 100])), (None, 0));
+    // A setting's key is read when it is as long as a key can be, and not at all when it is longer.
+    let key = WIDGET_SETTINGS_KEY_MAX as i32;
+    assert_eq!(key, 64);
+    assert_eq!(read("key.short", both, dropped("setting", &[0, 10, 1000, 64])), (None, 10));
+    assert_eq!(read("key.longest", both, dropped("setting", &[0, key, 1000, 64])), (None, 64));
+    assert_eq!(read("key.longer", both, dropped("setting", &[0, key + 1, 1000, 64])), (None, 0));
+    assert_eq!(read("key.page", both, dropped("setting", &[0, page, 1000, 64])), (None, 0));
+    assert_eq!(read("key.most", both, dropped("setting", &[0, MAX, 1000, 64])), (None, 0));
+    // The status line, a text and a label: read at their limit, and not read past it (the call is stopped first).
+    let stopped = Some(STOPPED.to_string());
+    assert_eq!(read("status.at", both, status(0, WIDGET_STATUS_MAX as i32)), (None, WIDGET_STATUS_MAX));
+    assert_eq!(read("status.past", both, status(0, WIDGET_STATUS_MAX as i32 + 1)), (stopped.clone(), 0));
+    assert_eq!(read("text.at", both, text(0, 0, 200, 40, 0, WIDGET_TEXT_MAX as i32, 1, 0)), (None, WIDGET_TEXT_MAX));
+    assert_eq!(read("text.past", both, text(0, 0, 200, 40, 0, WIDGET_TEXT_MAX as i32 + 1, 1, 0)), (stopped.clone(), 0));
+    assert_eq!(read("label.past", both, button(1, 0, 0, 200, 40, 0, page, 0)), (stopped.clone(), 0));
+    // state_get reads nothing of the module's memory (it writes), and what the calls of a pass read adds up.
+    assert_eq!(read("state.get", both, [call("state_set", &[0, 300]), dropped("state_get", &[1000, 300]), status(0, 50)].concat()), (None, 350));
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// What a call's budget is charged for one call of an import, beside the same call given nothing: the fuel a
@@ -865,7 +960,8 @@ fn a_module_is_checked_again_before_each_load() {
     // The index and the manifest agreeing on a file the rule for artifact.path does not take: the path is asked
     // again at the load, whatever the index says. The state folder, in any case of its letters (a storage that
     // ignores case finds it by each), with the module's own bytes there:
-    for path in ["state/runtime.bin", "STATE/runtime.bin", "State/settings.json", "sTaTe/module.bin"] {
+    // (and a name the storage walk does not take, which the rule asks about as well)
+    for path in ["state/runtime.bin", "STATE/runtime.bin", "State/settings.json", "sTaTe/module.bin", ".module.bin", "dist./module.bin", "notes.sdr/module.bin"] {
         let at = dir.join(path);
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
         std::fs::write(&at, &module).unwrap();
@@ -880,6 +976,8 @@ fn a_module_is_checked_again_before_each_load() {
     let _ = std::fs::remove_dir_all(dir.join("STATE"));
     let _ = std::fs::remove_dir_all(dir.join("State"));
     let _ = std::fs::remove_dir_all(dir.join("sTaTe"));
+    let _ = std::fs::remove_dir_all(dir.join("dist."));
+    let _ = std::fs::remove_dir_all(dir.join("notes.sdr"));
     // The manifest itself, in another case of its letters, with the index recording the manifest's own SHA-256:
     // no file of that name is read as a module.
     for path in ["Package.yaml", "PACKAGE.YAML"] {

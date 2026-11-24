@@ -151,6 +151,8 @@ struct HostState {
     /// the bytes of the texts in `commands`, and the bytes state_get and state_set moved in this call
     text_bytes: usize,
     state_bytes: usize,
+    /// the bytes read from the module's memory in this call (`read_mem`)
+    read_bytes: usize,
     state: Vec<u8>,
     state_path: String,
     settings: Vec<(String, String)>,
@@ -211,6 +213,7 @@ impl WidgetRuntime {
             hits: Vec::new(),
             text_bytes: 0,
             state_bytes: 0,
+            read_bytes: 0,
             state,
             state_path,
             settings,
@@ -280,7 +283,7 @@ impl WidgetRuntime {
                 return Err(past(caller.data(), "the bytes of the status line", WIDGET_STATUS_MAX));
             }
             charge(&mut caller, len.max(0) as u64 * WIDGET_CHARGE_BYTE)?;
-            caller.data_mut().status = String::from_utf8_lossy(&read_mem(&caller, ptr, len)).into_owned();
+            caller.data_mut().status = String::from_utf8_lossy(&read_mem(&mut caller, ptr, len)).into_owned();
             Ok(())
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "request_redraw", |mut caller: Caller<'_, HostState>, after_ms: i32| -> Result<(), wasmi::Error> {
@@ -299,7 +302,7 @@ impl WidgetRuntime {
                 return Ok(0);
             }
             charge(&mut caller, key_len.max(0) as u64 * WIDGET_CHARGE_BYTE)?;
-            let key = read_mem(&caller, key_ptr, key_len);
+            let key = read_mem(&mut caller, key_ptr, key_len);
             let value = caller.data().settings.iter().find(|(k, _)| k.as_bytes() == key.as_slice()).map(|(_, v)| v.as_bytes().to_vec()).unwrap_or_default();
             charge(&mut caller, value.len().min(out_cap.max(0) as usize) as u64 * WIDGET_CHARGE_BYTE)?;
             Ok(write_mem(&mut caller, out_ptr, out_cap, &value))
@@ -324,7 +327,7 @@ impl WidgetRuntime {
             let n = (len.max(0) as usize).min(WIDGET_STATE_MAX);
             state_moved(caller.data_mut(), n)?;
             charge(&mut caller, n as u64 * WIDGET_CHARGE_BYTE)?;
-            let state = read_mem(&caller, ptr, n as i32);
+            let state = read_mem(&mut caller, ptr, n as i32);
             let st = caller.data_mut();
             st.state = state;
             st.dirty = true;
@@ -426,6 +429,7 @@ impl WidgetRuntime {
         st.hits.clear();
         st.text_bytes = 0;
         st.state_bytes = 0;
+        st.read_bytes = 0;
         let _ = self.store.set_fuel(WIDGET_CALL_FUEL);
     }
 
@@ -438,6 +442,13 @@ impl WidgetRuntime {
     /// host's work. At most WIDGET_CALL_FUEL, which a call that was stopped for it has used up.
     pub fn fuel_used(&self) -> u64 {
         self.used
+    }
+
+    /// The bytes the host read from the module's memory in the last call, all its imports together: a text's,
+    /// a label's, the status line's, a setting's key, the state `state_set` kept. Never more than the limits let
+    /// an import read, whatever lengths the module passed.
+    pub fn bytes_read(&self) -> usize {
+        self.store.data().read_bytes
     }
 
     /// A call that trapped (its instructions used up, a limit passed, a fault of the module's own):
@@ -605,16 +616,20 @@ fn state_moved(st: &mut HostState, n: usize) -> Result<(), wasmi::Error> {
     Ok(())
 }
 
-fn read_mem(caller: &Caller<'_, HostState>, ptr: i32, len: i32) -> Vec<u8> {
+/// `len` bytes of the module's memory from `ptr`, or as many as the memory has there. Every read of the
+/// module's memory is this one, and the bytes it copies are counted (`WidgetRuntime::bytes_read`).
+fn read_mem(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Vec<u8> {
     if ptr < 0 || len <= 0 {
         return Vec::new();
     }
     let Some(memory) = caller.get_export("memory").and_then(Extern::into_memory) else { return Vec::new() };
-    let data = memory.data(caller);
+    let data = memory.data(&*caller);
     let start = ptr as usize;
     let end = start.saturating_add(len as usize).min(data.len());
     if start >= end { return Vec::new() }
-    data[start..end].to_vec()
+    let bytes = data[start..end].to_vec();
+    caller.data_mut().read_bytes += bytes.len();
+    bytes
 }
 
 fn write_mem(caller: &mut Caller<'_, HostState>, ptr: i32, cap: i32, bytes: &[u8]) -> i32 {

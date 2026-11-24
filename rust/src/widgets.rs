@@ -823,6 +823,11 @@ mod tests {
         let entry = |id: &str| WidgetEntry { id: id.to_string(), layout };
         assert_eq!(widgets_save(&[entry("Not An Id"), entry(&id), entry(&longer)]), 0);
         assert_eq!(widgets_load(), vec![entry(&id)]);
+        // (the file itself, not what the reader makes of it: two lines of comment and that frame's line)
+        let written = std::fs::read_to_string(root.join("widgets.ini")).unwrap();
+        let lines: Vec<&str> = written.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(lines, [format!("{id}=300,400,{},{},0,{},0", layout.w, layout.h, layout.z)]);
+        assert!(!written.contains("Not An Id") && !written.contains(&longer));
         widget_catalog_invalidate();
         let _ = std::fs::remove_dir_all(&root);
     }
