@@ -24,6 +24,13 @@ expect editor.widgets is 1 test.runs.loop
 expect editor.widget.0.rect is 1456 28 220 160
 expect editor.widget.0.error is The widget stopped: all fuel consumed by WebAssembly
 expect editor.widget.0.hits is 0
+# A frame whose module failed says the reason first, then whose widget it is. This body, 192x74 at 1470,100, has
+# room for one line: the start of the reason ("The widget s..."), at the top of the body, and nothing under it or
+# under the frame.
+expect editor.widget.0.says is The widget stopped: all fuel consumed by WebAssembly | Loop v1.0.0 · Grimoire tests
+expect display.dark.1470.100.192.40 is 1576
+expect display.dark.1470.140.192.34 is 0
+expect display.dark.1456.192.220.40 is 0
 shot 01-loop
 # (the frame is still a frame: it closes)
 tap panel widget.0.close

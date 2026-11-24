@@ -183,6 +183,21 @@ impl WidgetFrame {
         self.runtime_error.as_deref().or_else(|| self.runtime.as_ref().and_then(WidgetRuntime::error))
     }
 
+    /// What a frame whose module failed says in place of its body, in the order it is drawn: the reason (the
+    /// frame's error), then whose widget it is (the package's name, its version and its author). None while the
+    /// module runs. The reason is first so that a body with room for little shows it.
+    pub fn says(&self) -> Option<(String, String)> {
+        let reason = self.error()?.to_string();
+        let mut whose = self.def.name.to_string();
+        if !self.def.version.is_empty() {
+            whose.push_str(&format!(" v{}", self.def.version));
+        }
+        if !self.def.author.is_empty() {
+            whose.push_str(&format!(" · {}", self.def.author));
+        }
+        Some((reason, whose))
+    }
+
     /// The frame as drawn and hit: a minimized widget is a small square at its corner.
     pub fn rect(&self) -> Rect {
         if self.layout.minimized {
@@ -638,6 +653,21 @@ mod tests {
             assert!(min_w >= floor_w && min_h >= floor_h && max_w >= min_w && max_h >= min_h);
         }
         ui_init(300.0);
+    }
+
+    #[test]
+    fn a_failed_frame_says_the_reason_first() {
+        static NAMED: WidgetDef = WidgetDef { name: "A Widget With A Long Name", version: "1.2.3", author: "Its Author", ..TEST_WIDGET };
+        let mut f = WidgetFrame::new(&NAMED);
+        assert_eq!(f.says(), None, "a frame with no error says nothing of one");
+        f.runtime_error = Some("The widget's artifact could not be read.".to_string());
+        let (reason, whose) = f.says().unwrap();
+        assert_eq!(reason, "The widget's artifact could not be read.");
+        assert_eq!(whose, "A Widget With A Long Name v1.2.3 · Its Author");
+        // (a package with no version or author in its catalog entry: its name alone)
+        let mut f = WidgetFrame::new(&TEST_WIDGET);
+        f.runtime_error = Some("The widget package is not installed.".to_string());
+        assert_eq!(f.says(), Some(("The widget package is not installed.".to_string(), "Test".to_string())));
     }
 
     #[test]

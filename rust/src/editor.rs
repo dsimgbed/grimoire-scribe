@@ -2601,14 +2601,21 @@ fn draw_widget_frame(a: &mut App, i: usize) {
         if let Some(rt) = f.runtime.as_mut() {
             rt.draw(c, body);
         }
-        if let Some(err) = f.error() {
-            let mut text = format!("{}\nv{}", f.def.name, f.def.version);
-            if !f.def.author.is_empty() {
-                text.push_str(&format!(" · {}", f.def.author));
+        if let Some((reason, whose)) = f.says() {
+            // The reason first, in as many lines as it needs and the body holds, so that a small body shows it;
+            // under it, where lines are left, whose widget it is. Nothing of either leaves the body.
+            let px = ui_small_size();
+            let lh = (font_ascent(FontFace::Regular, px) + font_descent(FontFace::Regular, px)).max(1);
+            let room = (body.h / lh).clamp(1, 6);
+            let lines = font_wrap_lines(FontFace::Regular, px, &reason, body.w, None).clamp(1, room);
+            let clip = c.clip;
+            canvas_set_clip(c, rect_intersect(clip, body));
+            ui_text(c, FontFace::Regular, px, px, Rect { x: body.x, y: body.y, w: body.w, h: lines * lh }, &reason, lines, false, 0);
+            if room > lines {
+                let under = (room - lines).min(2);
+                ui_text(c, FontFace::Regular, px, px, Rect { x: body.x, y: body.y + lines * lh, w: body.w, h: under * lh }, &whose, under, false, 0);
             }
-            text.push('\n');
-            text.push_str(err);
-            ui_text(c, FontFace::Regular, ui_small_size(), ui_small_size(), body, &text, 6, false, 0);
+            c.clip = clip;
         } else if f.runtime.is_none() {
             let mut text = f.def.name.to_string();
             if !f.def.version.is_empty() {
@@ -12980,6 +12987,7 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
             "text" => { csnprintf!(out, cap, "%s", f.runtime.as_ref().map_or(String::new(), WidgetRuntime::text).as_str()); }
             "hits" => { csnprintf!(out, cap, "%d", f.runtime.as_ref().map_or(0, |r| r.hit_count() as i32)); }
             "error" => { csnprintf!(out, cap, "%s", f.error().unwrap_or("")); }
+            "says" => { csnprintf!(out, cap, "%s", f.says().map_or(String::new(), |(reason, whose)| format!("{reason} | {whose}")).as_str()); }
             _ => return -1,
         }
         return 0;
