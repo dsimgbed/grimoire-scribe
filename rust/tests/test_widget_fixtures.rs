@@ -44,6 +44,8 @@ fn committed_widget_fixtures_are_what_the_generator_makes() {
 #[test]
 fn the_generator_is_deterministic_and_its_modules_are_webassembly() {
     assert_eq!(widgetfix::wide(), widgetfix::wide());
+    assert_eq!(widgetfix::longest_id().len(), grimoire::widgetpkg::WIDGET_ID_MAX);
+    assert!(grimoire::widgetpkg::widget_id_ok(&widgetfix::longest_id()));
     for p in widgetfix::packages() {
         assert!(p.module.starts_with(b"\0asm\x01\0\0\0"), "{}", p.id);
         assert!(p.manifest.contains(&format!("id: {}\n", p.id)));

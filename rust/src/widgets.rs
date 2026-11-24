@@ -453,8 +453,9 @@ fn widgets_path() -> String {
     format!("{}/widgets.ini", store_root())
 }
 
-/// Reads widgets.ini. A missing or unreadable file is an empty layout. Lines that are not a known
-/// id with seven comma-separated fields are skipped; the file is small and human-editable.
+/// Reads widgets.ini. A missing or unreadable file is an empty layout. Lines that are not a package's
+/// id (`widget_id_ok`, the manifest check's own rule) with seven comma-separated fields are skipped;
+/// the file is small and human-editable.
 pub fn widgets_load() -> Vec<WidgetEntry> {
     let root = store_root();
     if root.is_empty() {
@@ -472,7 +473,7 @@ pub fn widgets_load() -> Vec<WidgetEntry> {
         }
         let Some((id, rest)) = line.split_once('=') else { continue };
         let id = id.trim();
-        if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_') {
+        if !crate::widgetpkg::widget_id_ok(id) {
             continue;
         }
         let v: Vec<&str> = rest.split(',').map(str::trim).collect();
@@ -501,7 +502,9 @@ pub fn widgets_load() -> Vec<WidgetEntry> {
     out
 }
 
-/// Writes widgets.ini atomically. The open frames are the file: a closed widget has no line.
+/// Writes widgets.ini atomically. The open frames are the file: a closed widget has no line. A line is
+/// written for an id the reader takes (every installed package's is one), so the file holds no line that
+/// would be skipped when it is read.
 pub fn widgets_save(entries: &[WidgetEntry]) -> i32 {
     let root = store_root();
     if root.is_empty() {
@@ -510,7 +513,7 @@ pub fn widgets_save(entries: &[WidgetEntry]) -> i32 {
     let _ = mkdir_p(&root);
     let mut s = String::from("# Grimoire widget layout. One line per open widget:\n");
     s.push_str("# id=x,y,w,h,minimized,z\n");
-    for e in entries {
+    for e in entries.iter().filter(|e| crate::widgetpkg::widget_id_ok(&e.id)) {
         s.push_str(&format!(
             "{}={},{},{},{},{},{},0\n",
             e.id, e.layout.x, e.layout.y, e.layout.w, e.layout.h, e.layout.minimized as i32, e.layout.z
@@ -675,4 +678,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A manifest with this id and nothing a frame needs beyond it.
+    fn manifest_of(id: &str) -> String {
+        format!(
+            "name: Long\nid: {id}\ntype: widget\nversion: 1.0.0\nartifact:\n  path: w.bin\n  sha256: {}\n  size: 4\nspec:\n  runtime: wasm\n",
+            crate::sha256::sha256_of(b"test")
+        )
+    }
+
+    #[test]
+    fn a_frame_of_a_package_with_the_longest_id_is_there_after_a_restart() {
+        use crate::widgetpkg::{widget_catalog_invalidate, widget_id_ok, widget_package_install, WIDGET_ID_MAX};
+        ui_init(300.0);
+        let root = std::env::temp_dir().join(format!("grimoire-widgets-long-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(store_init(root.to_str().unwrap()), 0);
+        widget_catalog_invalidate();
+        // The longest id the manifest check takes: 128 bytes of every kind of character an id has.
+        assert_eq!(WIDGET_ID_MAX, 128);
+        let id = format!("com.example.{}", "long-id-0123456789.".repeat(7));
+        let id = &id[..WIDGET_ID_MAX - 1];
+        let id = format!("{id}z");
+        assert!(id.len() == WIDGET_ID_MAX && widget_id_ok(&id));
+        widget_package_install(&manifest_of(&id), b"test", "", 1860, 2480).unwrap();
+        // (one byte more is no id: not to the manifest check, and not in widgets.ini)
+        let longer = format!("{id}z");
+        assert!(!widget_id_ok(&longer));
+        assert!(widget_package_install(&manifest_of(&longer), b"test", "", 1860, 2480).is_err());
+
+        // Open its frame and move it; the layout is saved as the editor saves it.
+        let mut h = WidgetHost::new();
+        assert!(h.spawn(widget_def(&id).unwrap(), area(), panel()));
+        h.frames[0].move_to(300, 400, area());
+        let layout = h.frames[0].layout;
+        assert_eq!(h.save(), 0);
+        assert_eq!(widgets_load(), vec![WidgetEntry { id: id.clone(), layout }]);
+
+        // A restart: nothing is kept but the files. The catalog is read again, then the layout.
+        drop(h);
+        widget_catalog_invalidate();
+        let mut again = WidgetHost::new();
+        again.load(area());
+        assert_eq!(again.frames.len(), 1, "the frame is open again");
+        assert_eq!((again.frames[0].def.id, again.frames[0].layout), (id.as_str(), layout));
+
+        // widgets.ini's reader takes the ids the manifest check takes, and no others.
+        std::fs::write(
+            root.join("widgets.ini"),
+            format!("{longer}=1,2,300,300,0,1,0\nCom.Example=1,2,300,300,0,2,0\ncom_example=1,2,300,300,0,3,0\n.com.example=1,2,300,300,0,4,0\ncom..example=1,2,300,300,0,5,0\ncom.example.=1,2,300,300,0,6,0\n{id}=5,6,300,300,1,7,0\n"),
+        )
+        .unwrap();
+        let got = widgets_load();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].id.as_str(), got[0].layout.z), (id.as_str(), 7));
+        // (and the writer leaves out a line its reader would skip)
+        let entry = |id: &str| WidgetEntry { id: id.to_string(), layout };
+        assert_eq!(widgets_save(&[entry("Not An Id"), entry(&id), entry(&longer)]), 0);
+        assert_eq!(widgets_load(), vec![entry(&id)]);
+        widget_catalog_invalidate();
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

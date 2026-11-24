@@ -224,15 +224,21 @@ pub const BOTH: [&str; 2] = ["editor:overlay", "storage:widget-local"];
 /// A package of the scenarios' data root: its id, name, manifest and module, and the SHA-256 its index entry
 /// records (the module's own, but for the package made to differ).
 pub struct Package {
-    pub id: &'static str,
+    pub id: String,
     pub name: &'static str,
     pub manifest: String,
     pub module: Vec<u8>,
     pub recorded: String,
 }
 
-fn package(id: &'static str, name: &'static str, capabilities: &[&str], size: &str, module: Vec<u8>) -> Package {
-    Package { id, name, manifest: manifest(id, name, capabilities, size, &module), recorded: sha256_of(&module), module }
+fn package(id: &str, name: &'static str, capabilities: &[&str], size: &str, module: Vec<u8>) -> Package {
+    Package { id: id.to_string(), name, manifest: manifest(id, name, capabilities, size, &module), recorded: sha256_of(&module), module }
+}
+
+/// An id of the greatest length an id may have, 128 bytes, with every kind of character an id has.
+pub fn longest_id() -> String {
+    let id = format!("test.host.long.{}", "0123456789-abcdefghij.".repeat(6));
+    format!("{}z", &id[..127])
 }
 
 /// A module that draws far outside its body: a selected (black) button from far above and left of the body to
@@ -284,6 +290,8 @@ pub fn packages() -> Vec<Package> {
         Package { recorded: sha256_of(&keeps()), ..package("test.host.changed", "Changed", &BOTH, FIXED_400_300, wide()) },
         // (installed with a smallest size of 120x80, under the smallest frame there is)
         package("test.host.small", "Small", &BOTH, SMALLEST_120_80, wide()),
+        // (its id is as long as an id may be)
+        package(&longest_id(), "Long", &BOTH, FIXED_400_300, keeps()),
     ]
 }
 

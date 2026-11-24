@@ -670,9 +670,16 @@ pub fn widget_package_parse(text: &str) -> Result<WidgetPackage, String> {
     Ok(p)
 }
 
-fn id_ok(id: &str) -> bool {
+/// The longest id a package may have, in bytes (docs/WIDGETS.md).
+pub const WIDGET_ID_MAX: usize = 128;
+
+/// Whether `id` is a package's id: lowercase letters, digits, dots and hyphens, at most WIDGET_ID_MAX, no dot
+/// first or last and no two in a row. The one rule for an id wherever one is read: a manifest, the packages
+/// index, a package's folder, and a frame's line in widgets.ini (widgets.rs), so a package that installs is one
+/// whose open frame is found again.
+pub fn widget_id_ok(id: &str) -> bool {
     !id.is_empty()
-        && id.len() <= 128
+        && id.len() <= WIDGET_ID_MAX
         && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
         && id.as_bytes()[0] != b'.'
         && id.as_bytes()[id.len() - 1] != b'.'
@@ -740,7 +747,7 @@ pub fn widget_package_validate(p: &WidgetPackage, canvas_w: i32, canvas_h: i32) 
     if p.type_ != "widget" {
         return Err("This repository is not a widget package".into());
     }
-    if !id_ok(&p.id) {
+    if !widget_id_ok(&p.id) {
         return Err("`id` must be lowercase letters, digits, dots and hyphens".into());
     }
     if p.name.trim().is_empty() {
@@ -959,7 +966,7 @@ pub fn widget_package_index_load() -> Vec<WidgetInstall> {
             continue;
         }
         let id = json_get_str(&data, &toks[..n as usize], it, "id");
-        if !id_ok(&id) {
+        if !widget_id_ok(&id) {
             continue;
         }
         out.push(WidgetInstall {
@@ -1149,7 +1156,7 @@ pub fn widget_package_install(manifest: &str, artifact: &[u8], source_url: &str,
 
 /// Removes an installed package and its files. The `state` folder is kept when `keep_state` is set.
 pub fn widget_package_remove(id: &str, keep_state: bool) -> Result<(), String> {
-    if !id_ok(id) {
+    if !widget_id_ok(id) {
         return Err("That id is not a widget package's.".into());
     }
     let dir = widget_package_dir(id);
@@ -1183,7 +1190,7 @@ pub fn widget_package_remove(id: &str, keep_state: bool) -> Result<(), String> {
 
 /// Rolls an install back to the `.previous` copy.
 pub fn widget_package_rollback(id: &str) -> Result<(), String> {
-    if !id_ok(id) {
+    if !widget_id_ok(id) {
         return Err("That id is not a widget package's.".into());
     }
     let dir = widget_package_dir(id);
@@ -1250,7 +1257,7 @@ pub fn widget_setting_next(s: &WidgetSetting, current: &str) -> String {
 /// this version no longer offers reads as the default; an old key is left out.
 pub fn widget_settings_load(id: &str, schema: &[WidgetSetting]) -> Vec<(String, String)> {
     let mut out = widget_settings_defaults(schema);
-    if !id_ok(id) {
+    if !widget_id_ok(id) {
         return out;
     }
     let Some(data) = read_file_max(&widget_settings_path(id), WIDGET_SETTINGS_FILE_MAX) else { return out };
@@ -1283,7 +1290,7 @@ pub fn widget_settings_load(id: &str, schema: &[WidgetSetting]) -> Vec<(String, 
 /// Writes setting values atomically under the package's state folder. Keys that are not valid
 /// setting keys are skipped, as are values longer than a choice can hold.
 pub fn widget_settings_save(id: &str, values: &[(String, String)]) -> i32 {
-    if !id_ok(id) {
+    if !widget_id_ok(id) {
         return -1;
     }
     let mut body = String::from("{\n  \"version\": 1,\n  \"values\": {");
@@ -1315,7 +1322,7 @@ pub fn widget_settings_save(id: &str, values: &[(String, String)]) -> i32 {
 /// Removes the saved values, so every setting reads its manifest default again. A missing file is
 /// already reset.
 pub fn widget_settings_clear(id: &str) -> i32 {
-    if !id_ok(id) {
+    if !widget_id_ok(id) {
         return -1;
     }
     match std::fs::remove_file(widget_settings_path(id)) {

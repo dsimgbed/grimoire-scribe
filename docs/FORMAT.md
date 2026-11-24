@@ -1582,8 +1582,10 @@ critical on purpose.
 The editor's open widgets, one line each: an installed package's id (`com.example.timer`). A line
 is the widget's id, an `=`, and seven comma-separated numbers: x, y, width, height, minimized (0
 or 1), z-order, and a reserved flag (written as 0). Coordinates are screen pixels, as the panel's
-are. A closed widget has no line. Unknown ids and malformed lines are skipped. The file is at most
-64 KiB, written atomically.
+are. A closed widget has no line. An id here is read by the rule a manifest's `id` is checked by
+(lowercase letters, digits, dots and hyphens, at most 128 bytes, no dot first or last and no two in
+a row), so the frame of any package that installs is found again. Unknown ids and malformed lines
+are skipped. The file is at most 64 KiB, written atomically.
 
 ```
 # Grimoire widget layout. One line per open widget:
@@ -1604,7 +1606,7 @@ or anything under `state/`, which belongs to the host and the widget's saved dat
 
 ```yaml
 name: Timer
-id: com.example.timer          # lowercase letters, digits, dots and hyphens
+id: com.example.timer          # lowercase letters, digits, dots and hyphens, at most 128 bytes
 version: 1.0.0                 # semantic version (a -prerelease suffix is allowed)
 type: widget
 author: Jane Doe

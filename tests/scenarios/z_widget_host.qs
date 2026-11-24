@@ -121,4 +121,23 @@ shot 06-small
 tap panel widget.0.close
 wait 300
 expect editor.widgets is 0
+# Long is a package whose id is as long as an id may be, 128 bytes. A scenario line cannot name a row that long,
+# so its row, the sixth of the popup, is tapped where it is. Its frame opens, draws its button and is left open:
+# z_widget_host_kept starts Grimoire again on this data and finds it.
+tap panel widgets
+wait 300
+shot 07-popup
+tap 1404 2246
+wait 400
+expect editor.widgets.open is 0
+expect editor.widgets is 1 test.host.long.0123456789-abcdefghij.0123456789-abcdefghij.0123456789-abcdefghij.0123456789-abcdefghij.0123456789-abcdefghij.01z
+expect editor.widget.0.rect is 1276 28 400 300
+expect editor.widget.0.error is
+expect editor.widget.0.text is hello
+drag touch 1400 60 900 700 8
+wait 400
+expect editor.owner is none
+expect editor.widget.0.rect is 776 668 400 300
+shot 08-long
+wait 1800
 quit
