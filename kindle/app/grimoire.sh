@@ -326,12 +326,14 @@ restore() {
     fi
     if [ "$PILLOW_DISABLED" = yes ]; then
         # Put back what was on screen before us, then let the home booklet repaint.
+        # On a bridge handoff to Zotero (RC=42), skip waking the Kindle Home booklet so
+        # KPPMainApp/Home does not race-unmap X11 windows right before Zotero starts.
         if [ -f "$DUMP" ]; then
-            cat "$DUMP" >"$FB" 2>/dev/null
+            [ "${RC:-0}" != 42 ] && cat "$DUMP" >"$FB" 2>/dev/null
             rm -f "$DUMP"
         fi
         lipc-set-prop com.lab126.pillow disableEnablePillow enable 2>/dev/null
-        [ -z "$HOSTED" ] && lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home 2>/dev/null
+        [ -z "$HOSTED" ] && [ "${RC:-0}" != 42 ] && lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home 2>/dev/null
     fi
 
 }
