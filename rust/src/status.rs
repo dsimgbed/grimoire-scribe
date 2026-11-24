@@ -87,19 +87,31 @@ impl Default for Battery {
 
 /// "Oct 10, 14:32  87%" (or "Oct 10, 2:32 PM  87%" on the 12-hour clock): the time as the app writes
 /// times (the language in use, local time), then the percent; just the time where the battery cannot be
-/// read. This is what the runner's `status.text` reads: the percent is drawn right of the battery, which
-/// sits between the two.
+/// read.
 pub fn status_text(t: i64, b: &Battery, twelve: bool) -> String {
+    status_text_with_page(t, b, twelve, None)
+}
+
+/// Like `status_text`, and when a notebook page is open (`Some((cur, total))`) appends `  p. X/Y`.
+/// This is what the runner's `status.text` reads: the percent is drawn right of the battery (which
+/// sits between time and percent), and the page number sits right of the percent (or right of the
+/// time when the battery cannot be read).
+pub fn status_text_with_page(t: i64, b: &Battery, twelve: bool, page: Option<(i32, i32)>) -> String {
     let mut when = String::new();
     if twelve {
         format_time_short_12h(t, &mut when, 64);
     } else {
         format_time_short(t, &mut when, 64);
     }
-    if b.percent >= 0 {
+    let base = if b.percent >= 0 {
         cformat!("%s  %d%%", &when, b.percent)
     } else {
         when
+    };
+    if let Some((cur, total)) = page {
+        cformat!("%s  p. %d/%d", &base, cur, total)
+    } else {
+        base
     }
 }
 
@@ -170,7 +182,7 @@ pub fn status_reserved(_a: &App) -> i32 { 0 }
 pub fn status_cycle_mode(a: &mut App) { status_toggle(a); }
 
 fn bar_layout(a: &App, b: &Battery) -> Layout {
-    let mut l = layout_of(0, 0, a.w, a.h, sys_wall_clock(), a.settings.clock_12h, b);
+    let mut l = layout_of(0, 0, a.w, a.h, sys_wall_clock(), a.settings.clock_12h, b, None);
     let h = status_reserved(a);
     let pad = ui_px(16.0);
     let half = h / 2;
@@ -180,6 +192,7 @@ fn bar_layout(a: &App, b: &Battery) -> Layout {
     let dy = (half - l.rect.h) / 2 - l.rect.y;
     l.time_r.x += dx; l.time_r.y += dy;
     l.pct_r.x += dx; l.pct_r.y += dy;
+    l.page_r.x += dx; l.page_r.y += dy;
     if let Some(r) = l.icon.as_mut() { r.x += dx; r.y += dy; }
     l.rect = Rect { x: 0, y: 0, w: a.w, h };
     if let Some((book, page, links)) = crate::editor::editor_status_text(a) {
@@ -255,13 +268,13 @@ struct State {
     battery: Battery,
     read_at: u32,
     /// what the panel shows now: the rect (empty for nothing), what it says, its battery icon and how much
-    /// of it is lit, and the minute and battery that says
+    /// of it is lit, and the minute, battery and page number that says
     drawn: Rect,
     drawn_text: String,
     drawn_charging: bool,
     drawn_icon: Rect,
     drawn_fill: i32,
-    drawn_key: Option<(i64, Battery)>,
+    drawn_key: Option<(i64, Battery, Option<(i32, i32)>)>,
     /// refreshes asked for and not sent yet: a few rects, apart (empty for none)
     pending: Vec<Rect>,
     /// the touch event status_touch saw last was the lift of a tap in the corner, which turned the
@@ -311,19 +324,21 @@ struct BarCell { rect: Rect, text: String, icon: IconKind }
 struct Layout {
     cells: Vec<BarCell>,
     rect: Rect,
-    /// "Oct 10, 14:32  87%", as `status.text` reads it
+    /// "Oct 10, 14:32  87%  p. 3/12", as `status.text` reads it
     text: String,
     time: String,
     time_r: Rect,
     pct: String,
     pct_r: Rect,
+    page: String,
+    page_r: Rect,
     /// the battery art, with no battery reading none
     icon: Option<Rect>,
     unit: i32,
     battery: Battery,
     px: f32,
-    /// the minute and battery it shows
-    key: (i64, Battery),
+    /// the minute, battery and page number it shows
+    key: (i64, Battery, Option<(i32, i32)>),
 }
 
 /// How many of the FILL_COLS columns a charge lights: the nearest to its share, one for any charge at all.
@@ -334,10 +349,11 @@ pub fn battery_fill(percent: i32) -> i32 {
     clampi((percent * FILL_COLS + 50) / 100, 1, FILL_COLS)
 }
 
-/// The indicator for a size, a corner of a w by h screen, a time and a battery: the time, the battery's
-/// art and then its percent, left to right in every corner. Its text is in the monospaced face every
-/// theme shares, so its box changes only with the number of characters.
-fn layout_of(size: i32, corner: i32, sw: i32, sh: i32, t: i64, twelve: bool, b: &Battery) -> Layout {
+/// The indicator for a size, a corner of a w by h screen, a time, a battery and an optional page
+/// number: the time, the battery's art, its percent and then `p. X/Y`, left to right in every corner.
+/// Its text is in the monospaced face every theme shares, so its box changes only with the number of
+/// characters.
+fn layout_of(size: i32, corner: i32, sw: i32, sh: i32, t: i64, twelve: bool, b: &Battery, page: Option<(i32, i32)>) -> Layout {
     let m = metrics(size);
     let mut time = String::new();
     if twelve {
@@ -351,24 +367,38 @@ fn layout_of(size: i32, corner: i32, sw: i32, sh: i32, t: i64, twelve: bool, b: 
     let pct = if has_battery { cformat!("%d%%", b.percent) } else { String::new() };
     let pw = if has_battery { font_measure(face, m.px, &pct) } else { 0 };
     let (iw, g1, g2) = if has_battery { (ICON_UW * m.unit, (m.px * 0.6) as i32, (m.px * 0.3) as i32) } else { (0, 0, 0) };
-    let bw = m.padx + tw + g1 + iw + g2 + pw + m.padx;
+    let page_s = match page {
+        Some((cur, total)) => cformat!("p. %d/%d", cur, total),
+        None => String::new(),
+    };
+    let (g3, page_w) = if !page_s.is_empty() {
+        ((m.px * 0.6) as i32, font_measure(face, m.px, &page_s))
+    } else {
+        (0, 0)
+    };
+    let bw = m.padx + tw + g1 + iw + g2 + pw + g3 + page_w + m.padx;
     let rect = corner_box(corner, sw, sh, bw, m.bh, ui_px(6.0));
     let time_r = Rect { x: rect.x + m.padx, y: rect.y, w: tw + 2, h: rect.h };
     let ix = time_r.x + tw + g1;
     let icon = has_battery.then_some(Rect { x: ix, y: rect.y + (rect.h - m.ih) / 2, w: iw, h: m.ih });
+    let pct_r = Rect { x: ix + iw + g2, y: rect.y, w: pw + 2, h: rect.h };
+    let page_x = if has_battery { pct_r.x + pw + g3 } else { time_r.x + tw + g3 };
+    let page_r = Rect { x: page_x, y: rect.y, w: if page_w > 0 { page_w + 2 } else { 0 }, h: rect.h };
     Layout {
         cells: Vec::new(),
         rect,
-        text: status_text(t, b, twelve),
+        text: status_text_with_page(t, b, twelve, page),
         time,
         time_r,
         pct,
-        pct_r: Rect { x: ix + iw + g2, y: rect.y, w: pw + 2, h: rect.h },
+        pct_r,
+        page: page_s,
+        page_r,
         icon,
         unit: m.unit,
         battery: *b,
         px: m.px,
-        key: (t.div_euclid(60), *b),
+        key: (t.div_euclid(60), *b, page),
     }
 }
 
@@ -382,10 +412,18 @@ fn band(a: &App) -> Rect {
     Rect { x: 0, y: if bottom { a.h - h } else { 0 }, w: a.w, h }
 }
 
+fn page_number(a: &App) -> Option<(i32, i32)> {
+    #[cfg(test)]
+    if let Some(p) = TEST_PAGE.with(|c| c.get()) {
+        return p;
+    }
+    crate::editor::editor_page_number(a)
+}
+
 fn layout(a: &App) -> Layout {
     let b = with(|s| s.battery);
     if status_reserved(a) > 0 { bar_layout(a, &b) } else {
-        layout_of(a.settings.status_size, a.settings.status_corner, a.w, a.h, sys_wall_clock(), a.settings.clock_12h, &b)
+        layout_of(a.settings.status_size, a.settings.status_corner, a.w, a.h, sys_wall_clock(), a.settings.clock_12h, &b, page_number(a))
     }
 }
 
@@ -443,13 +481,16 @@ fn draw(c: &mut Canvas, l: &Layout) {
             font_draw_left_name(c, FontFace::Regular, ui_px(30.0) as f32, r, &cell.text, 0);
         }
     } else {
-    ui_frame(c, l.rect, ui_px(8.0), 255, true, 0);
-    ui_frame(c, l.rect, ui_px(8.0), 0, false, ui_px(2.0));
+        ui_frame(c, l.rect, ui_px(8.0), 255, true, 0);
+        ui_frame(c, l.rect, ui_px(8.0), 0, false, ui_px(2.0));
     }
     font_draw_left(c, FontFace::Fixed, l.px, l.time_r, &l.time, 0);
     if let Some(ir) = l.icon {
         draw_battery(c, ir, l.unit, &l.battery);
         font_draw_left(c, FontFace::Fixed, l.px, l.pct_r, &l.pct, 0);
+    }
+    if !l.page.is_empty() {
+        font_draw_left(c, FontFace::Fixed, l.px, l.page_r, &l.page, 0);
     }
 }
 
@@ -467,13 +508,15 @@ pub fn status_preview(c: &mut Canvas, r: Rect, size: i32, corner: i32, twelve: b
         return;
     }
     let b = with(|s| s.battery);
-    let mut l = layout_of(size, corner, r.w, r.h, sys_wall_clock(), twelve, &b);
+    let mut l = layout_of(size, corner, r.w, r.h, sys_wall_clock(), twelve, &b, None);
     l.rect.x += r.x;
     l.rect.y += r.y;
     l.time_r.x += r.x;
     l.time_r.y += r.y;
     l.pct_r.x += r.x;
     l.pct_r.y += r.y;
+    l.page_r.x += r.x;
+    l.page_r.y += r.y;
     if let Some(icon) = l.icon.as_mut() {
         icon.x += r.x;
         icon.y += r.y;
@@ -520,10 +563,11 @@ fn page_in_front(a: &App) -> bool {
     a.scr == ScreenId::Editor && editor_page_in_front(a)
 }
 
-// (The unit tests have no notebook: they say whether the page is in front.)
+// (The unit tests have no notebook: they say whether the page is in front and optionally its page number.)
 #[cfg(test)]
 thread_local! {
     static TEST_FRONT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static TEST_PAGE: std::cell::Cell<Option<Option<(i32, i32)>>> = const { std::cell::Cell::new(None) };
 }
 
 /// Whether the panel should hold the indicator now: it is on, and the page is in front.
@@ -784,7 +828,7 @@ pub fn status_tick(a: &mut App, now: u32) {
     if with(|s| s.read_at == 0 || now.wrapping_sub(s.read_at) >= POLL_MS) {
         read_battery();
     }
-    let key = (sys_wall_clock().div_euclid(60), with(|s| s.battery));
+    let key = (sys_wall_clock().div_euclid(60), with(|s| s.battery), page_number(a));
     if status_reserved(a) > 0 {
         let l = layout(a);
         let old = with(|s| s.bar_cells.clone());
@@ -1027,6 +1071,11 @@ mod tests {
         TEST_FRONT.with(|c| c.set(Some(on)));
     }
 
+    /// Override `page_number(a)` for unit tests without a notebook (`None` restores `editor_page_number`).
+    fn test_page(p: Option<Option<(i32, i32)>>) {
+        TEST_PAGE.with(|c| c.set(p));
+    }
+
     fn up() {
         ui_init(300.0);
         assert_eq!(font_init(), 0);
@@ -1065,6 +1114,23 @@ mod tests {
         // the language in use: Spanish writes the day first
         i18n_apply("es");
         assert_eq!(status_text(1700000000, &b, false), "14 nov, 22:13  87%");
+        i18n_apply("en");
+    }
+
+    #[test]
+    fn the_text_with_page_appends_the_page_number() {
+        utc();
+        up();
+        let b = Battery { percent: 87, charging: false };
+        assert_eq!(status_text_with_page(1700000000, &b, false, None), "Nov 14, 22:13  87%");
+        assert_eq!(status_text_with_page(1700000000, &b, false, Some((3, 12))), "Nov 14, 22:13  87%  p. 3/12");
+        assert_eq!(status_text_with_page(1700000000, &Battery { percent: 87, charging: true }, false, Some((1, 1))), "Nov 14, 22:13  87%  p. 1/1");
+        assert_eq!(status_text_with_page(1700000000, &Battery::default(), false, Some((3, 12))), "Nov 14, 22:13  p. 3/12");
+        assert_eq!(status_text_with_page(1700000000, &b, true, Some((3, 12))), "Nov 14, 10:13 PM  87%  p. 3/12");
+        assert_eq!(status_text_with_page(1700000000, &Battery::default(), true, Some((3, 12))), "Nov 14, 10:13 PM  p. 3/12");
+        i18n_apply("es");
+        assert_eq!(status_text_with_page(1700000000, &b, false, Some((3, 12))), "14 nov, 22:13  87%  p. 3/12");
+        assert_eq!(status_text_with_page(1700000000, &Battery::default(), false, Some((3, 12))), "14 nov, 22:13  p. 3/12");
         i18n_apply("en");
     }
 
@@ -1280,9 +1346,9 @@ mod tests {
         let t = 1700000000;
         for corner in 0..STATUS_CORNERS {
             let (s0, s1, s2) = (
-                layout_of(0, corner, 1860, 2480, t, false, &b),
-                layout_of(1, corner, 1860, 2480, t, false, &b),
-                layout_of(2, corner, 1860, 2480, t, false, &b),
+                layout_of(0, corner, 1860, 2480, t, false, &b, None),
+                layout_of(1, corner, 1860, 2480, t, false, &b, None),
+                layout_of(2, corner, 1860, 2480, t, false, &b, None),
             );
             assert!(s0.rect.w < s1.rect.w && s1.rect.w < s2.rect.w);
             assert!(s0.rect.h < s1.rect.h && s1.rect.h < s2.rect.h);
@@ -1303,31 +1369,83 @@ mod tests {
                 // the art is centred in the box's height (to a pixel)
                 assert!((icon.y - l.rect.y - (l.rect.y + l.rect.h - (icon.y + icon.h))).abs() <= 1);
                 assert_eq!(l.text, "Nov 14, 22:13  87%");
-                assert_eq!((l.time.as_str(), l.pct.as_str()), ("Nov 14, 22:13", "87%"));
+                assert_eq!((l.time.as_str(), l.pct.as_str(), l.page.as_str()), ("Nov 14, 22:13", "87%", ""));
             }
         }
         // charging does not move or widen anything: the bolt is inside the art
-        let c = layout_of(1, 0, 1860, 2480, t, false, &Battery { percent: 87, charging: true });
-        let n = layout_of(1, 0, 1860, 2480, t, false, &b);
+        let c = layout_of(1, 0, 1860, 2480, t, false, &Battery { percent: 87, charging: true }, None);
+        let n = layout_of(1, 0, 1860, 2480, t, false, &b, None);
         assert_eq!(c.rect, n.rect);
         assert_eq!(c.icon, n.icon);
         // one box a minute, however the minute reads
-        assert_eq!(layout_of(1, 0, 1860, 2480, t, false, &b).key, layout_of(1, 0, 1860, 2480, t + 10, false, &b).key);
-        assert_ne!(layout_of(1, 0, 1860, 2480, t, false, &b).key, layout_of(1, 0, 1860, 2480, t + 60, false, &b).key);
+        assert_eq!(layout_of(1, 0, 1860, 2480, t, false, &b, None).key, layout_of(1, 0, 1860, 2480, t + 10, false, &b, None).key);
+        assert_ne!(layout_of(1, 0, 1860, 2480, t, false, &b, None).key, layout_of(1, 0, 1860, 2480, t + 60, false, &b, None).key);
         // the 12-hour clock: the same box, its time on the 12-hour clock
-        let twelve = layout_of(1, 0, 1860, 2480, t, true, &b);
+        let twelve = layout_of(1, 0, 1860, 2480, t, true, &b, None);
         assert_eq!(twelve.time, "Nov 14, 10:13 PM");
         assert_eq!(twelve.text, "Nov 14, 10:13 PM  87%");
         // without a percent the time alone, no battery drawn
-        let none = layout_of(1, 0, 1860, 2480, t, false, &Battery::default());
+        let none = layout_of(1, 0, 1860, 2480, t, false, &Battery::default(), None);
         assert!(none.icon.is_none() && none.pct.is_empty() && none.rect.w < n.rect.w);
         assert_eq!(none.text, "Nov 14, 22:13");
         // the box is as tall as the art and its margins, so the art never touches the frame
         for size in 0..STATUS_SIZES {
-            let l = layout_of(size, 0, 1860, 2480, t, false, &b);
+            let l = layout_of(size, 0, 1860, 2480, t, false, &b, None);
             let icon = l.icon.unwrap();
             assert!(icon.y - l.rect.y >= ui_px(3.0) && l.rect.h >= l.unit * ICON_UH + 2 * ui_px(3.0));
         }
+    }
+
+    #[test]
+    fn the_box_holds_the_page_number_across_sizes_and_corners() {
+        utc();
+        up();
+        let b = Battery { percent: 87, charging: false };
+        let t = 1700000000;
+        let page = Some((3, 12));
+        for corner in 0..STATUS_CORNERS {
+            let (s0, s1, s2) = (
+                layout_of(0, corner, 1860, 2480, t, false, &b, page),
+                layout_of(1, corner, 1860, 2480, t, false, &b, page),
+                layout_of(2, corner, 1860, 2480, t, false, &b, page),
+            );
+            assert!(s0.rect.w < s1.rect.w && s1.rect.w < s2.rect.w);
+            assert!(s0.rect.h < s1.rect.h && s1.rect.h < s2.rect.h);
+            for l in [&s0, &s1, &s2] {
+                let screen = Rect { x: 0, y: 0, w: 1860, h: 2480 };
+                assert!(rect_contains_rect(screen, l.rect) && l.rect.w < 1860 / 2, "w={} must be < {}", l.rect.w, 1860 / 2);
+                let icon = l.icon.expect("a battery");
+                assert!(rect_contains_rect(l.rect, l.time_r));
+                assert!(rect_contains_rect(l.rect, icon));
+                assert!(rect_contains_rect(l.rect, l.pct_r));
+                assert!(rect_contains_rect(l.rect, l.page_r));
+                assert!(
+                    l.time_r.x + l.time_r.w <= icon.x
+                        && icon.x + icon.w <= l.pct_r.x
+                        && l.pct_r.x + l.pct_r.w <= l.page_r.x,
+                    "time -> icon -> pct -> page left-to-right"
+                );
+                assert_eq!(l.page, "p. 3/12");
+                assert_eq!(l.text, "Nov 14, 22:13  87%  p. 3/12");
+            }
+            // without a battery reading, time -> page directly
+            let nb = layout_of(1, corner, 1860, 2480, t, false, &Battery::default(), page);
+            assert!(nb.icon.is_none() && nb.pct.is_empty());
+            assert!(rect_contains_rect(nb.rect, nb.time_r) && rect_contains_rect(nb.rect, nb.page_r));
+            assert!(nb.time_r.x + nb.time_r.w <= nb.page_r.x, "time -> page left-to-right without battery");
+            assert_eq!(nb.page, "p. 3/12");
+            assert_eq!(nb.text, "Nov 14, 22:13  p. 3/12");
+            assert!(nb.rect.w < s1.rect.w);
+        }
+        // key distinguishes page number and total count
+        assert_ne!(
+            layout_of(0, 0, 1860, 2480, t, false, &b, Some((1, 3))).key,
+            layout_of(0, 0, 1860, 2480, t, false, &b, Some((2, 3))).key
+        );
+        assert_ne!(
+            layout_of(0, 0, 1860, 2480, t, false, &b, Some((1, 3))).key,
+            layout_of(0, 0, 1860, 2480, t, false, &b, Some((1, 4))).key
+        );
     }
 
     // Settings' Clock page's sample: the indicator at the size and in the corner the rows choose.
@@ -1376,7 +1494,7 @@ mod tests {
             for corner in 0..STATUS_CORNERS {
                 a.settings.status_size = size;
                 a.settings.status_corner = corner;
-                let l = layout_of(size, corner, a.w, a.h, 1700000000, false, &b);
+                let l = layout_of(size, corner, a.w, a.h, 1700000000, false, &b, Some((3, 12)));
                 assert!(rect_contains_rect(band(&a), l.rect), "size {size} corner {corner}: {:?} in {:?}", l.rect, band(&a));
                 assert_eq!(band(&a).h, ui_px(6.0) + l.rect.h);
             }
@@ -1405,7 +1523,7 @@ mod tests {
         assert!(!status_hit(&a, (w.x - 60) as f32, (w.y + 5) as f32) && !status_hit(&a, (w.x + 10) as f32, (w.y - 60) as f32));
         // while the indicator is up, its box is part of the corner: the box and the square, not the screen between
         a.settings.status_corner = 0;
-        let l = layout_of(2, 0, a.w, a.h, 1700000000, false, &Battery { percent: 87, charging: true });
+        let l = layout_of(2, 0, a.w, a.h, 1700000000, false, &Battery { percent: 87, charging: true }, None);
         set_drawn(Some(&l));
         assert!(status_hit(&a, 70.0, 70.0) && status_hit(&a, (l.rect.x + l.rect.w - 5) as f32, 30.0));
         assert!(!status_hit(&a, (l.rect.x + l.rect.w + 20) as f32, 30.0) && !status_hit(&a, 400.0, 400.0));
@@ -1434,7 +1552,7 @@ mod tests {
         assert_eq!(out, "0 0 165 165");
         status_probe(&a, "front", &mut out, 64);
         assert_eq!(out, "0", "no notebook page in front");
-        let l = layout_of(0, 0, 1860, 2480, 1700000000, false, &Battery { percent: 9, charging: true });
+        let l = layout_of(0, 0, 1860, 2480, 1700000000, false, &Battery { percent: 9, charging: true }, None);
         set_drawn(Some(&l));
         status_probe(&a, "shown", &mut out, 64);
         assert_eq!(out, "1");
@@ -1450,7 +1568,7 @@ mod tests {
         status_probe(&a, "fill", &mut out, 64);
         assert_eq!(out, "1");
         // no battery: no icon, no fill
-        let l = layout_of(0, 0, 1860, 2480, 1700000000, false, &Battery::default());
+        let l = layout_of(0, 0, 1860, 2480, 1700000000, false, &Battery::default(), None);
         set_drawn(Some(&l));
         status_probe(&a, "icon", &mut out, 64);
         assert_eq!(out, "");
@@ -1653,7 +1771,7 @@ mod tests {
         a.settings.status_mode = 1;
         assert_eq!(canvas_init(&mut a.screen, 600, 400), 0);
         a.settings.status_on = true;
-        let l = layout_of(0, 0, 600, 400, 1700000000, false, &Battery { percent: 80, charging: false });
+        let l = layout_of(0, 0, 600, 400, 1700000000, false, &Battery { percent: 80, charging: false }, None);
         set_drawn(Some(&l));
         // the page goes out of front (a sheet opened): the tick asks for the indicator's own rect, and a
         // refresh that holds it takes it off the panel
@@ -1665,6 +1783,45 @@ mod tests {
         // and nothing more is asked while there is nothing on the panel
         status_tick(&mut a, 1000);
         assert!(with(|s| s.pending.is_empty()));
+        status_reset();
+    }
+
+    #[test]
+    fn status_tick_requests_a_refresh_when_the_page_number_changes() {
+        utc();
+        up();
+        status_reset();
+        front(true);
+        let mut a = App { w: 1860, h: 2480, dpi: 300.0, ..Default::default() };
+        a.settings.status_mode = 1;
+        a.settings.status_on = true;
+        assert_eq!(canvas_init(&mut a.screen, 1860, 2480), 0);
+        with(|s| {
+            s.battery = Battery { percent: 87, charging: false };
+            s.read_at = 1000;
+        });
+        test_page(Some(Some((1, 3))));
+        let l1 = layout(&a);
+        assert_eq!(l1.page, "p. 1/3");
+        set_drawn(Some(&l1));
+        status_tick(&mut a, 1000);
+        if layout(&a).key == l1.key {
+            assert!(with(|s| s.pending.is_empty()), "no refresh when page is unchanged");
+        }
+        // page turn: (1, 3) -> (2, 3)
+        test_page(Some(Some((2, 3))));
+        status_tick(&mut a, 1000);
+        assert!(!with(|s| s.pending.is_empty()), "page turn must request refresh");
+        // total count change: (1, 3) -> (1, 4)
+        test_page(Some(Some((1, 3))));
+        let l13 = layout(&a);
+        set_drawn(Some(&l13));
+        with(|s| s.pending.clear());
+        test_page(Some(Some((1, 4))));
+        status_tick(&mut a, 1000);
+        assert!(!with(|s| s.pending.is_empty()), "page count change must request refresh");
+        test_page(None);
+        front(false);
         status_reset();
     }
 

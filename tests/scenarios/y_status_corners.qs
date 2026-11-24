@@ -34,7 +34,7 @@ expect settings.status_on is 0
 tap 70 70
 wait 300
 expect settings.status_on is 1
-expect status.rect is 6 6 331 48
+expect status.rect is 6 6 432 48
 shot 01-top-left
 # Settings > Sleep & Clock > Clock settings, its corner row: top right, and no toast, though the page is covered
 # (issue #141).
@@ -56,8 +56,8 @@ tap library display.done
 wait 400
 expect editor.modal is none
 expect status.shown is 1
-expect status.rect is 1523 6 331 48
-expect status.icon is 1735 16 54 27
+expect status.rect is 1422 6 432 48
+expect status.icon is 1634 16 54 27
 shot 02-top-right
 # The zone moved with it: the old corner is the page's now, the new one the clock's.
 tap 70 70
@@ -76,15 +76,15 @@ key 46 0
 wait 300
 expect settings.status_corner is 2
 expect status.zone is 1695 2315 165 165
-expect status.rect is 1523 2426 331 48
-expect display.presents is ui 1523 6 331 48, ui 1523 2426 331 48
+expect status.rect is 1422 2426 432 48
+expect display.presents is ui 1422 6 432 48, ui 1422 2426 432 48
 shot 03-bottom-right
 key 305 0 1
 wait 300
 expect settings.status_corner is 3
 expect status.zone is 0 2315 165 165
-expect status.rect is 6 2426 331 48
-expect display.presents is ui 1523 2426 331 48, ui 6 2426 331 48
+expect status.rect is 6 2426 432 48
+expect display.presents is ui 1422 2426 432 48, ui 6 2426 432 48
 shot 04-bottom-left
 # A tap in the zone toggles there; the box is as a tap on it too.
 tap 70 2410
@@ -101,7 +101,7 @@ wait 300
 key 46 0
 wait 300
 expect settings.status_corner is 0
-expect status.rect is 6 6 331 48
+expect status.rect is 6 6 432 48
 # The Library shows none of it, and the shortcut there says so, with a toast of its own.
 tap panel library
 wait 600
@@ -138,7 +138,7 @@ wait 500
 expect rotation is 1
 expect status.zone is 2315 1695 165 165
 expect status.shown is 1
-expect status.rect is 2143 1806 331 48
+expect status.rect is 2042 1806 432 48
 shot 05-sideways-bottom-right
 tap 2400 1780
 wait 300

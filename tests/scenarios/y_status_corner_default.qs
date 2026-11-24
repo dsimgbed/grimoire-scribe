@@ -21,6 +21,7 @@ expect screen is editor
 expect status.shown is 1
 expect status.reserved is 0
 expect status.text has 87%
+expect status.text has p. 1/1
 expect editor.scale is 1.00
 shot 01-default-corner
 # The old strip is page space again.
@@ -39,4 +40,5 @@ pentap panel next
 wait 500
 expect status.shown is 1
 expect status.text has 87%
+expect status.text has p. 2/2
 quit

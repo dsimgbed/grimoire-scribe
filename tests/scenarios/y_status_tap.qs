@@ -24,13 +24,13 @@ expect screen is editor
 expect settings.status_on is 0
 expect status.zone is 0 0 165 165
 # The edges of the zone: the last pixel inside takes it, the first one outside does not. At this size the box is
-# 6 6 331 48; with 4 mm (47 px) around it, its place ends at x 384 and y 101 (a few pixels kept clear of those
+# 6 6 432 48; with 4 mm (47 px) around it, its place ends at x 485 and y 101 (a few pixels kept clear of those
 # edges: the runner's touch panel rounds a tap's place by a pixel).
 tap 164 164
 wait 200
 expect settings.status_on is 1
 expect status.shown is 1
-expect status.rect is 6 6 331 48
+expect status.rect is 6 6 432 48
 tap 600 600
 wait 100
 tap 165 104
@@ -39,7 +39,7 @@ expect settings.status_on is 1
 tap 100 165
 wait 200
 expect settings.status_on is 1
-tap 388 30
+tap 489 30
 wait 200
 expect settings.status_on is 1
 tap 20 20
@@ -47,13 +47,13 @@ wait 200
 expect settings.status_on is 0
 expect status.shown is 0
 # Off, a tap where the box shows, at its far end and near the end of the 4 mm beyond it, brings it back.
-tap 330 40
+tap 430 40
 wait 200
 expect settings.status_on is 1
 tap 20 20
 wait 200
 expect settings.status_on is 0
-tap 380 97
+tap 481 97
 wait 200
 expect settings.status_on is 1
 tap 20 20
@@ -125,11 +125,11 @@ expect display.presents not -1
 tap 70 70
 wait 120
 expect status.shown is 0
-expect display.presents is ui 6 6 331 48
+expect display.presents is ui 6 6 432 48
 tap 70 70
 wait 120
 expect status.shown is 1
-expect display.presents is ui 6 6 331 48
+expect display.presents is ui 6 6 432 48
 # The setting is kept after the refresh, so a restart finds it as the last tap left it.
 expect settings.status_on is 1
 # Through the touch recognizer as the Kindle's panel goes through it (contact frames): one finger, one tap.

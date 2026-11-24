@@ -2320,6 +2320,15 @@ pub fn editor_status_text(a: &App) -> Option<(String, String, String)> {
     ))
 }
 
+/// Current 1-based page number and total page count for the open notebook, if any.
+pub fn editor_page_number(a: &App) -> Option<(i32, i32)> {
+    let s = a.ed.as_deref()?;
+    if !s.open || s.nb.page_ids.is_empty() {
+        return None;
+    }
+    Some((s.index + 1, s.nb.page_ids.len() as i32))
+}
+
 /// Refit after the status strip is enabled or removed, in either orientation.
 pub fn editor_status_changed(a: &mut App) {
     if a.scr == ScreenId::Editor && a.ed.as_deref().is_some_and(|s| s.open) {

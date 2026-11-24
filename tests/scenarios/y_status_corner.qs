@@ -63,12 +63,12 @@ tap 70 70
 wait 300
 expect settings.status_on is 1
 expect status.shown is 1
-expect status.text is Nov 14, 22:13  87%
+expect status.text is Nov 14, 22:13  87%  p. 1/1
 expect status.charging is 0
-expect status.rect is 6 6 331 48
+expect status.rect is 6 6 432 48
 expect status.icon is 218 16 54 27
 expect status.fill is 10
-expect display.presents is ui 6 6 331 48
+expect display.presents is ui 6 6 432 48
 shot 01-page-on
 # A tap on the indicator itself turns it off (its box is part of the corner), and the refresh takes it
 # down where it was.
@@ -76,11 +76,11 @@ tap 250 30
 wait 300
 expect settings.status_on is 0
 expect status.shown is 0
-expect display.presents is ui 6 6 331 48
+expect display.presents is ui 6 6 432 48
 tap 70 70
 wait 300
 expect status.shown is 1
-expect display.presents is ui 6 6 331 48
+expect display.presents is ui 6 6 432 48
 # Not a tap: a finger that stays down, one that swipes out of the corner, one that comes down outside it,
 # the pen.
 touch down 70 70
@@ -140,7 +140,7 @@ tap library display.done
 wait 400
 expect editor.modal is none
 expect status.shown is 1
-expect status.rect is 6 6 624 88
+expect status.rect is 6 6 811 88
 expect status.icon is 401 23 108 54
 shot 03-page-large
 # Charging: the bolt is inside the battery, so the box does not widen; a battery that changes is one refresh, a
@@ -148,27 +148,27 @@ shot 03-page-large
 expect display.presents not -1
 battery 86 charging
 wait 300
-expect status.text is Nov 14, 22:13  86%
+expect status.text is Nov 14, 22:13  86%  p. 1/1
 expect status.charging is 1
 expect status.fill is 10
-expect display.presents is ui 6 6 624 88
+expect display.presents is ui 6 6 811 88
 clock 1700000030
 wait 300
 expect display.presents is
 clock 1700000060
 wait 300
-expect status.text is Nov 14, 22:14  86%
-expect display.presents is ui 6 6 624 88
+expect status.text is Nov 14, 22:14  86%  p. 1/1
+expect display.presents is ui 6 6 811 88
 battery none
 wait 300
-expect status.text is Nov 14, 22:14
+expect status.text is Nov 14, 22:14  p. 1/1
 expect status.charging is 0
 expect status.icon is
 expect status.fill is
-expect display.presents is ui 6 6 624 88
+expect display.presents is ui 6 6 811 88
 battery 100
 wait 300
-expect status.text is Nov 14, 22:14  100%
+expect status.text is Nov 14, 22:14  100%  p. 1/1
 expect status.fill is 12
 shot 04-large-100
 # The pen near: nothing is sent, the clock waits; when it leaves the refresh comes.
@@ -178,21 +178,21 @@ battery 60
 clock 1700000100
 wait 300
 expect display.presents is
-expect status.text is Nov 14, 22:14  100%
+expect status.text is Nov 14, 22:14  100%  p. 1/1
 pen leave
 wait 300
-expect status.text is Nov 14, 22:15  60%
-expect display.presents is ui 6 6 650 88
+expect status.text is Nov 14, 22:15  60%  p. 1/1
+expect display.presents is ui 6 6 837 88
 # A stroke in progress: the same, and the stroke's own refreshes are not held for it.
 pen down 400 600 0.6
 pen move 460 640 0.6
 battery 59
 wait 300
-expect status.text is Nov 14, 22:15  60%
+expect status.text is Nov 14, 22:15  60%  p. 1/1
 pen up 500 650
 pen leave
 wait 600
-expect status.text is Nov 14, 22:15  59%
+expect status.text is Nov 14, 22:15  59%  p. 1/1
 # The shortcut, on any screen: a keyboard's S (a controller's South).
 key 31 0
 wait 300
@@ -211,13 +211,13 @@ wake
 wait 600
 expect asleep is 0
 expect status.shown is 1
-expect status.text is Nov 14, 22:15  59%
+expect status.text is Nov 14, 22:15  59%  p. 1/1
 # Sideways: the same corner of the turned screen.
 rotate 1
 wait 500
 expect rotation is 1
 expect status.shown is 1
-expect status.rect is 6 6 624 88
+expect status.rect is 6 6 811 88
 tap 70 70
 wait 300
 expect settings.status_on is 0
@@ -227,6 +227,13 @@ wait 300
 expect settings.status_on is 1
 expect status.shown is 1
 shot 05-sideways
+# Turning pages updates the page number in the pill immediately (p. 1/1 -> p. 2/2 -> p. 1/2).
+tap panel next
+wait 400
+expect status.text is Nov 14, 22:15  59%  p. 2/2
+tap panel previous
+wait 400
+expect status.text is Nov 14, 22:15  59%  p. 1/2
 # Back in the Library it is gone from the screen and stays a setting.
 tap panel library
 wait 600

@@ -82,7 +82,7 @@ pentap panel shapes.done
 pen leave
 wait 1100
 expect status.shown is 1
-expect status.rect is 6 6 331 48
+expect status.rect is 6 6 445 48
 swipe 2 930 900 0 400
 expect editor.modal is map
 quit

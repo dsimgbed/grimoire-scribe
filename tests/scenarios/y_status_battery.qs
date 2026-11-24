@@ -27,7 +27,7 @@ shot 01-100
 battery 87
 wait 300
 expect status.fill is 10
-expect status.text is Nov 14, 22:13  87%
+expect status.text is Nov 14, 22:13  87%  p. 1/1
 battery 50
 wait 300
 expect status.fill is 6
@@ -45,14 +45,14 @@ expect status.fill is 1
 battery 0
 wait 300
 expect status.fill is 0
-expect status.text is Nov 14, 22:13  0%
+expect status.text is Nov 14, 22:13  0%  p. 1/1
 shot 04-0
 # Charging: the bolt, over any charge, with the box and the battery where they were.
 battery 0 charging
 wait 300
 expect status.charging is 1
 expect status.fill is 0
-expect status.rect is 6 6 318 48
+expect status.rect is 6 6 419 48
 shot 05-0-charging
 battery 50 charging
 wait 300
@@ -63,13 +63,13 @@ battery 100 charging
 wait 300
 expect status.fill is 12
 shot 07-100-charging
-# No reading: the time alone, no battery.
+# No reading: the time and page alone, no battery.
 battery none
 wait 300
 expect status.icon is
 expect status.fill is
 expect status.charging is 0
-expect status.text is Nov 14, 22:13
+expect status.text is Nov 14, 22:13  p. 1/1
 shot 08-none
 # The art scales with the size: Clock settings' size row, small to medium to large.
 battery 50 charging
