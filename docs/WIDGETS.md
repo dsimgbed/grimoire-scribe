@@ -312,9 +312,10 @@ module may call `state_set` during a tap or a draw; the host writes the state fi
 at `packages/widgets/<id>/state/runtime.bin`. For a timer or a sticky note, that is the whole
 persistence model.
 
-Each call runs with a fixed instruction budget, and a module has one linear memory, which may
-grow to at most 32 MiB. A module that loops past the budget is stopped and its frame shows the
-error instead of freezing Grimoire. Imports outside the `grimoire` module fail to link, and the module has no
+Each call runs with a fixed instruction budget, from which the host's work for the imports it
+calls is paid as well ([Limits](#limits)), and a module has one linear memory, which may grow to at
+most 32 MiB. A module that loops past the budget is stopped and its frame shows the error instead of
+freezing Grimoire. Imports outside the `grimoire` module fail to link, and the module has no
 filesystem, network or process access.
 
 ### Limits
@@ -324,7 +325,7 @@ the limits below, and the counts start again with every call:
 
 | limit | |
 |---|---|
-| instructions in one call | 20,000,000 |
+| a call's budget | 20,000,000, counted in instructions: the module's own, and the host's work for its imports ([below](#what-a-calls-budget-pays-for)) |
 | the module's memories | 1, of at most 32 MiB (512 pages) |
 | the module's tables | 1, of at most 65,536 entries |
 | drawing commands in one pass (`rect`, `text` and `button` together) | 512 |
@@ -349,8 +350,41 @@ A module has one linear memory and at most one table. Memory past 32 MiB and tab
 starts larger than its limit, is not started: its frame says that the widget could not start.
 
 The limits leave room. The calculator package of `tests/fixtures/widgetcalc/` draws at most 39
-commands, 37 hit regions and 118 bytes of text in a pass, with a status line of 47 bytes, in about
-180,000 instructions.
+commands, 37 hit regions and 118 bytes of text in a pass, with a status line of 47 bytes. Its largest
+call takes about 300,000 from its budget in the frame it opens with (1.5%; about 180,000 of them are
+its own instructions) and about 430,000 in its largest frame.
+
+#### What a call's budget pays for
+
+A call's budget is counted in instructions, and it pays for two things: the instructions the module
+runs, and the work the host does for the imports the module calls. The second is no instruction of
+the module's, so each import takes a charge for it from the same budget: a fixed one for every call,
+and one by size where the work grows with what the import is given.
+
+| import | what a call of it takes from the budget |
+|---|---|
+| every import | 500 |
+| `rect` | and 1 for every 4 pixels of the rectangle that lie inside the body |
+| `button` | and 1 for every 2 pixels of the button that lie inside the body; and its label as a `text` 48 pixels high, with all of its bytes counted in the square |
+| `text` | and, for each byte, 32 for each pixel of its height (1 to 512) up to 64 pixels; above 64 pixels, half the square of the height for each byte, since a tall letter costs by its area; and 16 times the square of its bytes, counted to 256 bytes (a line that does not fit is cut short, and a label is broken in two, by steps that each measure the text again) |
+| `status`, `setting`, `state_get`, `state_set` | and 4 for each byte read from the module's memory or written to it |
+
+A call whose budget cannot pay a charge ends exactly as a call that ran out of instructions: its frame
+shows the same error, and nothing of the pass is drawn. A call of an import the package has no
+capability for pays the fixed charge and returns. The charges are set so that the host's work for a
+call takes, at most, a few times as long as the budget's worth of the module's own instructions.
+
+Some sums, for a sense of scale:
+
+- a clock's `12:34` as high as a text may be, 512 pixels: 5 x 512 x 512 / 2 + 16 x 25 + 500, about
+  656,000 (3% of the budget);
+- a line of 75 letters 34 pixels high: 75 x 34 x 32 + 16 x 75 x 75 + 500 = 172,100; a body full of
+  them, 41 lines: about 7,100,000 (35%);
+- a key of 120x120 pixels with a label of 3 bytes: 500 + 7,200 + 3 x 48 x 32 + 16 x 9 = 12,452;
+  a hundred of them: about 1,250,000 (6%);
+- a rectangle over the whole of the largest body (1274x1650): about 526,000, so a pass has room for
+  38 of them, not 512; and 16 KiB of text is paid for only when it is small and in short pieces
+  (512 texts of 32 letters fit the budget up to 20 pixels high).
 
 A module must be self-contained: the same bytes run on every supported Scribe, so there is nothing
 to cross-compile for armv7. A Rust `cdylib` built for `wasm32-unknown-unknown` with `extern "C"`

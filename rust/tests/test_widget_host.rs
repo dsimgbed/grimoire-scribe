@@ -88,9 +88,10 @@ fn passes() -> Vec<(&'static str, Vec<Op>)> {
         edges.extend(button(4, x, y, 240, 90, t, 12, 1));
         edges.extend(text(x, y, 240, 90, t, 12, 60, 0));
     }
+    // (a few letters at each height: the call's budget pays for a tall letter by its area)
     let mut texts = Vec::new();
     for px in [MAX, 100_000, 513, 512, 300, 0, -5, MIN] {
-        texts.extend(text(-300, -200, 5000, 400, t, n, px, 0));
+        texts.extend(text(-300, -200, 5000, 400, t, 8, px, 0));
         texts.extend(text(-4000, 20, 9000, 60, t, 3, px, 1));
     }
     let mut small = Vec::new();
@@ -318,7 +319,12 @@ fn a_pass_at_a_limit_runs_and_one_past_it_stops_as_out_of_instructions() {
     let root = fresh_root("limits");
     let stopped = STOPPED.to_string();
     let (commands, hits) = (WIDGET_PASS_COMMANDS_MAX, WIDGET_PASS_HITS_MAX);
-    let (one, all, line) = (WIDGET_TEXT_MAX as i32, WIDGET_PASS_TEXT_MAX / WIDGET_TEXT_MAX, WIDGET_STATUS_MAX as i32);
+    let (one, line) = (WIDGET_TEXT_MAX as i32, WIDGET_STATUS_MAX as i32);
+    // (all the texts of a pass: the limit is reached with short texts one pixel high, 511 of 32 bytes and one
+    // more; the call's budget would not pay for 16 KiB of long or tall ones)
+    let short = |len: i32| text(0, 0, 200, 40, 0, len, 1, 0);
+    let most = times(WIDGET_PASS_TEXT_MAX / 32 - 1, short(32));
+    assert_eq!(WIDGET_PASS_TEXT_MAX / 32, commands);
     let state = WIDGET_STATE_MAX as i32;
     let moves = WIDGET_CALL_STATE_MAX / WIDGET_STATE_MAX;
     let small = rect(0, 0, 8, 8, 0);
@@ -336,8 +342,8 @@ fn a_pass_at_a_limit_runs_and_one_past_it_stops_as_out_of_instructions() {
         ("one text", label(one), label(one + 1)),
         ("one label", key(one), key(one + 1)),
         ("a text of every length an i32 can say", label(-1), label(i32::MAX)),
-        ("all the texts of a pass", times(all, label(one)), join(times(all, label(one)), label(1))),
-        ("all the texts, the last a label", join(times(all - 1, label(one)), key(one)), join(times(all, label(one)), key(1))),
+        ("all the texts of a pass", join(most.clone(), short(32)), join(most.clone(), short(33))),
+        ("all the texts, the last a label", join(most.clone(), key(32)), join(most.clone(), key(33))),
         ("the status line", status(0, line), status(0, line + 1)),
         ("a status line of every length", status(0, -1), status(0, i32::MAX)),
         ("state written", times(moves, call("state_set", &[0, state])), times(moves + 1, call("state_set", &[0, state]))),
@@ -507,6 +513,230 @@ fn request_redraw_has_a_shortest_and_a_longest_delay() {
     rt.draw(&mut c, BODY);
     assert_eq!(rt.error(), Some(STOPPED));
     assert!(!rt.redraw_due(after(now_ms(), WIDGET_REDRAW_MAX_MS)));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A charge is the one expected. (The two passes compared are the same instructions with other numbers, and
+/// the interpreter counts some tens of instructions more or less for the numbers a function holds.)
+fn near(charged: u64, expected: u64, what: &str) {
+    assert!(charged.abs_diff(expected) <= 64, "charged {charged}, expected {expected} {what}");
+}
+
+/// What a call's budget is charged for one call of an import, beside the same call given nothing: the fuel a
+/// pass of `with` used less the fuel a pass of `without` used (two modules of the same instructions).
+fn charged(id: &str, with: &[Op], without: &[Op], data: &[(u32, &[u8])]) -> u64 {
+    let mut c = patterned(700, 600);
+    let mut used = Vec::new();
+    for (i, ops) in [with, without].into_iter().enumerate() {
+        let mut rt = installed(&format!("test.charge.{}.{i}", id.replace('_', "-")), &BOTH, &module(ops, &[], data));
+        rt.draw(&mut c, BODY);
+        assert_eq!(rt.error(), None, "{id}");
+        used.push(rt.fuel_used());
+    }
+    used[0].saturating_sub(used[1])
+}
+
+#[test]
+fn an_import_takes_its_charge_from_the_calls_budget() {
+    let root = fresh_root("charges");
+    let letters = [b'W'; 400];
+    let data: [(u32, &[u8]); 1] = [(0, &letters)];
+    // (the numbers of docs/WIDGETS.md, Limits)
+    assert_eq!((WIDGET_CALL_FUEL, WIDGET_CHARGE_CALL), (20_000_000, 500));
+    assert_eq!((WIDGET_CHARGE_RECT_PX, WIDGET_CHARGE_BUTTON_PX, WIDGET_CHARGE_LABEL_PX), (4, 2, 48));
+    assert_eq!((WIDGET_CHARGE_TEXT, WIDGET_CHARGE_TALL_PX, WIDGET_CHARGE_SQUARE, WIDGET_CHARGE_SQUARE_BYTES, WIDGET_CHARGE_BYTE), (32, 64, 16, 256, 4));
+    // Every call of an import: 500, and the instructions of the call itself (a few tens).
+    let one = charged("call", &times(2, vec![Op::Call("now"), Op::Drop]), &[Op::Call("now"), Op::Drop], &[]);
+    assert!((500..550).contains(&one), "{one}");
+    // A rectangle: 1 for every 4 pixels of the part of it inside the body (BODY is 240x180).
+    near(charged("rect", &rect(10, 10, 100, 60, 0), &rect(10, 10, 0, 0, 0), &[]), 100 * 60 / 4, "");
+    near(charged("rect.part", &rect(-50, -30, 100, 60, 0), &rect(10, 10, 0, 0, 0), &[]), 50 * 30 / 4, "");
+    near(charged("rect.whole", &rect(MIN, MIN, MAX, MAX, 0), &rect(-5000, -5000, 20_000, 20_000, 0), &[]), 0, "the body, however large the rectangle");
+    near(charged("rect.body", &rect(-5000, -5000, 20_000, 20_000, 0), &rect(0, 0, 0, 0, 0), &[]), 240 * 180 / 4, "");
+    near(charged("rect.outside", &rect(240, 0, 500, 500, 0), &rect(0, 0, 0, 0, 0), &[]), 0, "");
+    // A button: 1 for every 2 pixels, and its label as a text 48 pixels high.
+    near(charged("button", &button(1, 10, 10, 100, 60, 0, 0, 0), &button(1, 10, 10, 0, 0, 0, 0, 0), &[]), 100 * 60 / 2, "");
+    near(charged("label", &button(1, 10, 10, 100, 60, 0, 10, 0), &button(1, 10, 10, 100, 60, 0, 0, 0), &data), 10 * 48 * 32 + 16 * 10 * 10, "");
+    near(charged("label.long", &button(1, 10, 10, 100, 60, 0, 400, 0), &button(1, 10, 10, 100, 60, 0, 0, 0), &data), 400 * 48 * 32 + 16 * 400 * 400, "all a label's bytes are in the square");
+    // A text: 32 for each byte and pixel of height; above 64 pixels by the square of the height; and 16 for the
+    // square of its bytes, counted to 256.
+    let none = text(0, 0, 200, 40, 0, 0, 40, 0);
+    near(charged("text", &text(0, 0, 200, 40, 0, 10, 40, 0), &none, &data), 10 * 40 * 32 + 16 * 10 * 10, "");
+    near(charged("text.small", &text(0, 0, 200, 40, 0, 10, 1, 0), &none, &data), 10 * 32 + 16 * 10 * 10, "");
+    near(charged("text.least", &text(0, 0, 200, 40, 0, 10, -7, 0), &none, &data), 10 * 32 + 16 * 10 * 10, "a height under 1 is drawn, and paid, as 1");
+    near(charged("text.64", &text(0, 0, 200, 40, 0, 4, 64, 0), &none, &data), 4 * 64 * 32 + 16 * 4 * 4, "");
+    near(charged("text.tall", &text(0, 0, 200, 40, 0, 4, 128, 0), &none, &data), 4 * 128 * 128 / 2 + 16 * 4 * 4, "");
+    near(charged("text.tallest", &text(0, 0, 200, 40, 0, 4, 512, 0), &none, &data), 4 * 512 * 512 / 2 + 16 * 4 * 4, "");
+    near(charged("text.taller", &text(0, 0, 200, 40, 0, 4, 4000, 0), &none, &data), 4 * 512 * 512 / 2 + 16 * 4 * 4, "a height over 512 is drawn, and paid, as 512");
+    near(charged("text.long", &text(0, 0, 200, 40, 0, 400, 1, 0), &none, &data), 400 * 32 + 16 * 256 * 256, "a text's bytes are counted to 256 in the square");
+    // The status line, a setting's key, the state read and the state written: 4 for each byte.
+    near(charged("status", &status(0, 100), &status(0, 0), &data), 4 * 100, "");
+    near(charged("setting", &[call("setting", &[0, 40, 500, 64]), vec![Op::Drop]].concat(), &[call("setting", &[0, 0, 500, 64]), vec![Op::Drop]].concat(), &data), 4 * 40, "");
+    near(charged("setting.long", &[call("setting", &[0, 65, 500, 64]), vec![Op::Drop]].concat(), &[call("setting", &[0, 0, 500, 64]), vec![Op::Drop]].concat(), &data), 0, "no key is that long: nothing is read");
+    near(charged("state_set", &call("state_set", &[0, 300]), &call("state_set", &[0, 0]), &data), 4 * 300, "");
+    let read = |cap: i32| [call("state_set", &[0, 300]), call("state_get", &[1000, cap]), vec![Op::Drop]].concat();
+    near(charged("state_get", &read(1000), &read(0), &data), 4 * 300, "");
+    near(charged("state_get.some", &read(120), &read(0), &data), 4 * 120, "");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The largest body a frame can have: 70% of a 1860x2480 screen either way, less the frame's own parts.
+const LARGEST_BODY: Rect = Rect { x: 100, y: 200, w: 1302 - 28, h: 1736 - 86 };
+
+#[test]
+fn the_hosts_work_for_a_pass_is_paid_from_the_calls_budget() {
+    let root = fresh_root("work");
+    let mut c = patterned(1860, 2480);
+    let letters: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@&";
+    let words: Vec<u8> = (0..512).flat_map(|i| [b'a' + (i % 26) as u8, b' ']).collect();
+    let all = |ops: Vec<Op>| repeat(WIDGET_PASS_COMMANDS_MAX as i32, &code(&ops));
+    // (a text of 32 letters whose height is 512 less the turn of the loop it is drawn in)
+    let own_height = [code(&[Op::I(0), Op::I(0), Op::I(60_000), Op::I(600), Op::I(0), Op::I(32), Op::I(512)]), counter(), vec![0x6b], code(&[Op::I(0), Op::Call("text")])].concat();
+    // (the same from 512 down to 257, a height for two turns, with other letters on the second)
+    let tall = [
+        code(&[Op::I(0), Op::I(0), Op::I(60_000), Op::I(600)]),
+        [counter(), code(&[Op::I(1)]), vec![0x71], code(&[Op::I(32)]), vec![0x6c]].concat(),
+        code(&[Op::I(32), Op::I(512)]),
+        [counter(), code(&[Op::I(1)]), vec![0x76, 0x6b]].concat(),
+        code(&[Op::I(0), Op::Call("text")]),
+    ]
+    .concat();
+    // Passes within every count and length a pass is held to, each of them long work for the host on the
+    // largest body. The budget does not pay for any: each is stopped as a call out of instructions is, and
+    // nothing of it is drawn.
+    let long: Vec<(&str, Vec<u8>, &[u8])> = vec![
+        ("512 rectangles, each over the whole body", all(rect(-10, -10, 4000, 4000, 1)), letters),
+        ("512 buttons over the whole body, with labels of 32 bytes", all(button(1, -10, -10, 4000, 4000, 0, 32, 1)), letters),
+        ("512 texts of 32 letters at 40 px", all(text(0, 0, 60_000, 600, 0, 32, 40, 0)), letters),
+        ("512 texts of 32 letters, each at its own height, 512 to 1", repeat(512, &own_height), letters),
+        ("512 texts of 32 letters at heights 512 to 257, no letter twice at a height", repeat(512, &tall), letters),
+        ("16 buttons 9,000 px wide with labels of 512 one-letter words", repeat(16, &code(&button(1, 0, 0, 9000, 300, 0, 1023, 0))), &words),
+        ("16 texts of 1,024 bytes cut short to 300 px", repeat(16, &code(&text(0, 0, 300, 100, 0, 1024, 40, 0))), &words),
+    ];
+    for (i, (name, draw, data)) in long.into_iter().enumerate() {
+        let mut w = Wasm::new(draw);
+        w.data = vec![(0, data.to_vec())];
+        let mut rt = installed(&format!("test.work.{i}"), &BOTH, &w.bytes());
+        let before = c.clone();
+        rt.draw(&mut c, LARGEST_BODY);
+        assert_eq!(rt.error(), Some(STOPPED), "{name}");
+        assert_eq!(rt.fuel_used(), WIDGET_CALL_FUEL, "{name}: the budget is used up");
+        assert_eq!(changed_outside(&before, &c, RECT_EMPTY), 0, "{name}");
+    }
+    // What an honest pass asks for is paid many times over: a clock's digits as high as a text may be, a body
+    // full of small text (41 lines of 75 letters), and a keypad of a hundred keys over a background.
+    let line = [b'n'; 75];
+    let honest: Vec<(&str, Vec<u8>, &[u8], u64)> = vec![
+        ("a clock's digits 512 px high", code(&text(0, 0, 1274, 600, 0, 5, 512, 1)), b"12:34", 20),
+        ("a body full of small text", repeat(41, &code(&text(0, 0, 1274, 40, 0, 75, 34, 0))), &line, 2),
+        ("a hundred keys", [code(&rect(0, 0, 1274, 1650, 0)), repeat(100, &code(&button(1, 0, 0, 120, 120, 0, 3, 0)))].concat(), b"sin", 5),
+    ];
+    for (i, (name, draw, data, times_over)) in honest.into_iter().enumerate() {
+        let mut w = Wasm::new(draw);
+        w.data = vec![(0, data.to_vec())];
+        let mut rt = installed(&format!("test.honest.{i}"), &BOTH, &w.bytes());
+        rt.draw(&mut c, LARGEST_BODY);
+        assert_eq!(rt.error(), None, "{name}");
+        assert!(rt.fuel_used() * times_over < WIDGET_CALL_FUEL, "{name}: {} of the budget", rt.fuel_used());
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_loop_of_one_import_is_ended_by_the_calls_budget() {
+    let root = fresh_root("import-loops");
+    let mut c = patterned(700, 600);
+    let data = vec![(0u32, vec![b'k'; 512])];
+    let dropped = |import: &'static str, args: &[i32]| [code(&call(import, args)), vec![0x1a]].concat();
+    // Each import in a loop with no way out, in a package with both capabilities and in one with none (where
+    // the calls that need a capability return at once): the call is stopped, its budget used up.
+    let imports: Vec<(&str, Vec<u8>)> = vec![
+        ("rect", code(&rect(0, 0, 10, 10, 0))),
+        ("text", code(&text(0, 0, 100, 40, 0, 4, 20, 0))),
+        ("button", code(&button(1, 0, 0, 100, 40, 0, 4, 0))),
+        ("hit", code(&hit(1, 0, 0, 10, 10))),
+        ("status", code(&status(0, 256))),
+        ("request_redraw", code(&call("request_redraw", &[100]))),
+        ("setting", dropped("setting", &[0, 64, 1000, 64])),
+        ("state_get", dropped("state_get", &[1000, 64])),
+        ("state_set", code(&call("state_set", &[0, 0]))),
+        ("now", dropped("now", &[])),
+    ];
+    // (a loop of calls that each pay the fixed charge alone makes at most this many: the budget pays for no more)
+    let most = (WIDGET_CALL_FUEL / WIDGET_CHARGE_CALL) as i32;
+    for (import, one) in &imports {
+        for (kind, capabilities) in [("both", &BOTH[..]), ("none", &[][..])] {
+            let mut w = Wasm::new(forever(one));
+            w.data = data.clone();
+            let mut rt = installed_earlier(&format!("test.forever.{kind}.{}", import.replace('_', "-")), capabilities, &w.bytes());
+            rt.draw(&mut c, BODY);
+            assert_eq!(rt.error(), Some(STOPPED), "{import}, {kind}");
+            // The count: one call more than the budget pays fixed charges for is not made, and a tenth as many are
+            // (where no limit of a pass ends the loop first: a package with no capability draws nothing).
+            if kind == "none" {
+                let mut w = Wasm::new(repeat(most + 1, one));
+                w.data = data.clone();
+                let mut rt = installed_earlier(&format!("test.count.past.{}", import.replace('_', "-")), capabilities, &w.bytes());
+                rt.draw(&mut c, BODY);
+                assert_eq!((rt.error(), rt.fuel_used()), (Some(STOPPED), WIDGET_CALL_FUEL), "{import}: {} calls", most + 1);
+                let mut w = Wasm::new(repeat(most / 10, one));
+                w.data = data.clone();
+                let mut rt = installed_earlier(&format!("test.count.tenth.{}", import.replace('_', "-")), capabilities, &w.bytes());
+                rt.draw(&mut c, BODY);
+                assert_eq!(rt.error(), None, "{import}: {} calls", most / 10);
+                assert!(rt.fuel_used() >= (most / 10) as u64 * WIDGET_CHARGE_CALL && rt.fuel_used() < WIDGET_CALL_FUEL / 2, "{import}: {}", rt.fuel_used());
+            }
+        }
+    }
+    // The same in a tap, and in a start function.
+    let mut tapped = Wasm::new(Vec::new());
+    tapped.tap = forever(&dropped("now", &[]));
+    let mut rt = installed("test.forever.tap", &BOTH, &tapped.bytes());
+    rt.draw(&mut c, BODY);
+    rt.tap(1, 1);
+    assert_eq!((rt.error(), rt.fuel_used()), (Some("The widget stopped while handling a tap."), WIDGET_CALL_FUEL));
+    let mut starts = Wasm::new(Vec::new());
+    starts.start = Some(forever(&dropped("now", &[])));
+    let m = manifest("test.forever.start", "Test", &BOTH, FIXED_400_300, &starts.bytes());
+    widget_package_install(&m, &starts.bytes(), "", 1860, 2480).unwrap();
+    assert_eq!(WidgetRuntime::new("test.forever.start").err().as_deref(), Some("The widget could not start: all fuel consumed by WebAssembly"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Every call of the calculator fixture over its screens: a pass, then each key of the screen tapped and the
+/// pass after it, several times over (the keys change the screen: the modes, their menu, the unit converter).
+/// The largest fuel a call used.
+fn calculators_largest_call(body: Rect) -> u64 {
+    let mut rt = WidgetRuntime::new("com.grimoire.calculator").unwrap();
+    let mut c = patterned(1860, 2480);
+    rt.draw(&mut c, body);
+    let mut most = rt.fuel_used();
+    for _ in 0..4 {
+        for id in 0..400 {
+            let Some(key) = rt.hit(id) else { continue };
+            rt.tap(key.x + key.w / 2, key.y + key.h / 2);
+            most = most.max(rt.fuel_used());
+            rt.draw(&mut c, body);
+            most = most.max(rt.fuel_used());
+            assert_eq!(rt.error(), None, "after key {id}");
+        }
+    }
+    most
+}
+
+#[test]
+fn the_calculators_largest_call_uses_under_a_tenth_of_the_budget() {
+    let root = fresh_root("calc-budget");
+    let (fixture, module) = calculator();
+    widget_package_install(&fixture, &module, "", 1860, 2480).unwrap();
+    // Its frame as it opens (340x560) and as large as it resizes to (620x820): the body is 28 narrower and 86 shorter.
+    for (w, h) in [(340, 560), (620, 820)] {
+        let most = calculators_largest_call(Rect { x: 600, y: 400, w: w - 28, h: h - 86 });
+        eprintln!("the calculator's largest call in a frame of {w}x{h}: {most} of {WIDGET_CALL_FUEL}");
+        assert!(most > 100_000, "the calculator ran: {most}");
+        assert!(most * 10 < WIDGET_CALL_FUEL, "{most} at {w}x{h}");
+    }
+    widget_catalog_invalidate();
     let _ = std::fs::remove_dir_all(&root);
 }
 

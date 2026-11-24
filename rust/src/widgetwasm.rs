@@ -67,8 +67,9 @@ pub const WIDGET_TABLE_MAX: usize = 65_536;
 const MEMORIES_MAX: usize = 1;
 const TABLES_MAX: usize = 1;
 const INSTANCES_MAX: usize = 1;
-/// A widget gets this many instructions per call. A drawing pass that needs more is looping.
-const FUEL_PER_CALL: u64 = 20_000_000;
+/// A call's instruction budget: the module's own instructions and the host's work for its imports
+/// (the charges below) are paid from it. A call that needs more is stopped.
+pub const WIDGET_CALL_FUEL: u64 = 20_000_000;
 /// The saved state: `state_set` keeps the first this many bytes.
 pub const WIDGET_STATE_MAX: usize = 64 * 1024;
 /// The bytes `state_get` and `state_set` may move in one call, all their uses together: the whole
@@ -90,6 +91,37 @@ pub const WIDGET_REDRAW_MIN_MS: i32 = 100;
 pub const WIDGET_REDRAW_MAX_MS: i32 = 86_400_000;
 /// A text is drawn at most this many pixels high; a larger `px` is drawn at this size.
 pub const WIDGET_TEXT_PX_MAX: i32 = 512;
+// ---- the charges: what the host's work for an import takes from the call's budget (docs/WIDGETS.md, Limits) ----
+//
+// The budget counts the module's instructions. The host's work for an import is no instruction of the
+// module's, so each import takes a charge for it from the same budget (`charge`): a fixed one for every
+// call, and one by size where the work grows with what the import is given. The numbers are in
+// instructions: about what the work costs beside a module's own, measured in a release build, so that
+// the longest drawing a budget pays for takes a few times as long as the budget's worth of instructions.
+// When the budget cannot pay, the call ends exactly as a call that used up its instructions ends.
+
+/// Every call of an import, whatever it is given and whether or not the package has the capability for it.
+pub const WIDGET_CHARGE_CALL: u64 = 500;
+/// `rect`: one for this many pixels of the part of the rectangle inside the body (it is filled and outlined).
+pub const WIDGET_CHARGE_RECT_PX: u64 = 4;
+/// `button`: one for this many pixels of the part of the button inside the body (a button is drawn in more
+/// steps than a rectangle), and its label as a text WIDGET_CHARGE_LABEL_PX high.
+pub const WIDGET_CHARGE_BUTTON_PX: u64 = 2;
+pub const WIDGET_CHARGE_LABEL_PX: i32 = 48;
+/// `text`, and a label: for each byte, this for each pixel of its height up to WIDGET_CHARGE_TALL_PX; a
+/// taller letter costs by its area, so above that height a byte is charged by the square of the height
+/// (the same at WIDGET_CHARGE_TALL_PX exactly).
+pub const WIDGET_CHARGE_TEXT: u64 = 32;
+pub const WIDGET_CHARGE_TALL_PX: u64 = 64;
+/// `text`, and a label: this for the square of its bytes. A text that does not fit its line is cut short,
+/// and a label is broken into two lines, by steps that each measure the text again. A `text` is cut to
+/// its first WIDGET_CHARGE_SQUARE_BYTES bytes before those steps, so its bytes are counted to that many;
+/// a label's are all counted.
+pub const WIDGET_CHARGE_SQUARE: u64 = 16;
+pub const WIDGET_CHARGE_SQUARE_BYTES: u64 = 256;
+/// `status`, `setting`, `state_get`, `state_set`: each byte read from the module's memory or written to it.
+pub const WIDGET_CHARGE_BYTE: u64 = 4;
+
 /// How far outside the body, in pixels, an edge of a command's rectangle is still kept as given. A
 /// farther edge is moved in to this distance: what shows in the body is the same, and the sums the
 /// drawing makes with the rectangle stay small.
@@ -111,6 +143,9 @@ struct HostState {
     overlay: bool,
     /// the manifest declares `storage:widget-local`: the state is read, kept and saved
     storage: bool,
+    /// the size of the body the call draws on (a drawing pass's; a tap keeps the last pass's), for the
+    /// charge of a rectangle by the part of it inside the body
+    body: (i32, i32),
     commands: Vec<DrawCmd>,
     hits: Vec<(i32, Rect)>,
     /// the bytes of the texts in `commands`, and the bytes state_get and state_set moved in this call
@@ -135,6 +170,8 @@ pub struct WidgetRuntime {
     texts: Vec<String>,
     status: String,
     error: Option<String>,
+    /// what the last call took from its budget
+    used: u64,
 }
 
 impl std::fmt::Debug for WidgetRuntime {
@@ -169,6 +206,7 @@ impl WidgetRuntime {
             id: id.to_string(),
             overlay,
             storage,
+            body: (0, 0),
             commands: Vec::new(),
             hits: Vec::new(),
             text_bytes: 0,
@@ -189,38 +227,46 @@ impl WidgetRuntime {
         });
         store.limiter(|st| &mut st.limits);
         // The start section runs here, before a frame can draw: give it the same budget as a call.
-        let _ = store.set_fuel(FUEL_PER_CALL);
+        let _ = store.set_fuel(WIDGET_CALL_FUEL);
         let mut linker = Linker::new(&engine);
         linker.func_wrap(ABI, "rect", |mut caller: Caller<'_, HostState>, x: i32, y: i32, w: i32, h: i32, style: i32| -> Result<(), wasmi::Error> {
-            let st = caller.data_mut();
-            if st.overlay {
-                room_for_command(st)?;
-                st.commands.push(DrawCmd::Rect { x, y, w, h, style });
-            }
-            Ok(())
-        }).map_err(|e| e.to_string())?;
-        linker.func_wrap(ABI, "text", |mut caller: Caller<'_, HostState>, x: i32, y: i32, w: i32, h: i32, ptr: i32, len: i32, px: i32, center: i32| -> Result<(), wasmi::Error> {
+            charge(&mut caller, WIDGET_CHARGE_CALL)?;
             if !caller.data().overlay {
                 return Ok(());
             }
             room_for_command(caller.data())?;
-            let text = pass_text(&mut caller, ptr, len)?;
+            let area = area_in_body(caller.data(), x, y, w, h);
+            charge(&mut caller, area / WIDGET_CHARGE_RECT_PX)?;
+            caller.data_mut().commands.push(DrawCmd::Rect { x, y, w, h, style });
+            Ok(())
+        }).map_err(|e| e.to_string())?;
+        linker.func_wrap(ABI, "text", |mut caller: Caller<'_, HostState>, x: i32, y: i32, w: i32, h: i32, ptr: i32, len: i32, px: i32, center: i32| -> Result<(), wasmi::Error> {
+            charge(&mut caller, WIDGET_CHARGE_CALL)?;
+            if !caller.data().overlay {
+                return Ok(());
+            }
+            room_for_command(caller.data())?;
+            let text = pass_text(&mut caller, ptr, len, px, WIDGET_CHARGE_SQUARE_BYTES)?;
             caller.data_mut().commands.push(DrawCmd::Text { x, y, w, h, text, px, center: center != 0 });
             Ok(())
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "button", |mut caller: Caller<'_, HostState>, id: i32, x: i32, y: i32, w: i32, h: i32, ptr: i32, len: i32, style: i32| -> Result<(), wasmi::Error> {
+            charge(&mut caller, WIDGET_CHARGE_CALL)?;
             if !caller.data().overlay {
                 return Ok(());
             }
             room_for_command(caller.data())?;
             room_for_hit(caller.data())?;
-            let text = pass_text(&mut caller, ptr, len)?;
+            let area = area_in_body(caller.data(), x, y, w, h);
+            charge(&mut caller, area / WIDGET_CHARGE_BUTTON_PX)?;
+            let text = pass_text(&mut caller, ptr, len, WIDGET_CHARGE_LABEL_PX, u64::MAX)?;
             let st = caller.data_mut();
             st.commands.push(DrawCmd::Button { x, y, w, h, text, style });
             st.hits.push((id, Rect { x, y, w, h }));
             Ok(())
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "hit", |mut caller: Caller<'_, HostState>, id: i32, x: i32, y: i32, w: i32, h: i32| -> Result<(), wasmi::Error> {
+            charge(&mut caller, WIDGET_CHARGE_CALL)?;
             let st = caller.data_mut();
             if st.overlay {
                 room_for_hit(st)?;
@@ -229,58 +275,70 @@ impl WidgetRuntime {
             Ok(())
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "status", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> Result<(), wasmi::Error> {
+            charge(&mut caller, WIDGET_CHARGE_CALL)?;
             if len.max(0) as usize > WIDGET_STATUS_MAX {
                 return Err(past(caller.data(), "the bytes of the status line", WIDGET_STATUS_MAX));
             }
+            charge(&mut caller, len.max(0) as u64 * WIDGET_CHARGE_BYTE)?;
             caller.data_mut().status = String::from_utf8_lossy(&read_mem(&caller, ptr, len)).into_owned();
             Ok(())
         }).map_err(|e| e.to_string())?;
-        linker.func_wrap(ABI, "request_redraw", |mut caller: Caller<'_, HostState>, after_ms: i32| {
+        linker.func_wrap(ABI, "request_redraw", |mut caller: Caller<'_, HostState>, after_ms: i32| -> Result<(), wasmi::Error> {
+            charge(&mut caller, WIDGET_CHARGE_CALL)?;
             // (a pass is drawing: a package that may not draw is not drawn again for the asking)
             if caller.data().overlay {
                 let after_ms = after_ms.clamp(WIDGET_REDRAW_MIN_MS, WIDGET_REDRAW_MAX_MS) as u32;
                 caller.data_mut().redraw_at = Some(now_ms().wrapping_add(after_ms));
             }
+            Ok(())
         }).map_err(|e| e.to_string())?;
-        linker.func_wrap(ABI, "setting", |mut caller: Caller<'_, HostState>, key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32| -> i32 {
+        linker.func_wrap(ABI, "setting", |mut caller: Caller<'_, HostState>, key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32| -> Result<i32, wasmi::Error> {
+            charge(&mut caller, WIDGET_CHARGE_CALL)?;
             // (no setting has a longer key: nothing is read for one)
             if key_len.max(0) as usize > crate::widgetpkg::WIDGET_SETTINGS_KEY_MAX {
-                return 0;
+                return Ok(0);
             }
+            charge(&mut caller, key_len.max(0) as u64 * WIDGET_CHARGE_BYTE)?;
             let key = read_mem(&caller, key_ptr, key_len);
             let value = caller.data().settings.iter().find(|(k, _)| k.as_bytes() == key.as_slice()).map(|(_, v)| v.as_bytes().to_vec()).unwrap_or_default();
-            write_mem(&mut caller, out_ptr, out_cap, &value)
+            charge(&mut caller, value.len().min(out_cap.max(0) as usize) as u64 * WIDGET_CHARGE_BYTE)?;
+            Ok(write_mem(&mut caller, out_ptr, out_cap, &value))
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "state_get", |mut caller: Caller<'_, HostState>, ptr: i32, cap: i32| -> Result<i32, wasmi::Error> {
+            charge(&mut caller, WIDGET_CHARGE_CALL)?;
             if !caller.data().storage {
                 return Ok(0);
             }
             let n = caller.data().state.len().min(cap.max(0) as usize);
             state_moved(caller.data_mut(), n)?;
+            charge(&mut caller, n as u64 * WIDGET_CHARGE_BYTE)?;
             let state = caller.data().state[..n].to_vec();
             Ok(write_mem(&mut caller, ptr, cap, &state))
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "state_set", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> Result<(), wasmi::Error> {
+            charge(&mut caller, WIDGET_CHARGE_CALL)?;
             if !caller.data().storage {
                 return Ok(());
             }
             // (the first WIDGET_STATE_MAX bytes are the state: no more than those are read)
             let n = (len.max(0) as usize).min(WIDGET_STATE_MAX);
             state_moved(caller.data_mut(), n)?;
+            charge(&mut caller, n as u64 * WIDGET_CHARGE_BYTE)?;
             let state = read_mem(&caller, ptr, n as i32);
             let st = caller.data_mut();
             st.state = state;
             st.dirty = true;
             Ok(())
         }).map_err(|e| e.to_string())?;
-        linker.func_wrap(ABI, "now", || -> i64 {
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+        linker.func_wrap(ABI, "now", |mut caller: Caller<'_, HostState>| -> Result<i64, wasmi::Error> {
+            charge(&mut caller, WIDGET_CHARGE_CALL)?;
+            Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64))
         }).map_err(|e| e.to_string())?;
         let instance = linker.instantiate_and_start(&mut store, &module).map_err(|e| format!("The widget could not start: {e}"))?;
         if instance.get_memory(&store, "memory").is_none() {
             return Err("The widget has no memory export.".into());
         }
-        Ok(WidgetRuntime { _engine: engine, store, instance, hits: Vec::new(), texts: Vec::new(), status: String::new(), error: None })
+        Ok(WidgetRuntime { _engine: engine, store, instance, hits: Vec::new(), texts: Vec::new(), status: String::new(), error: None, used: 0 })
     }
 
     /// Calls `widget_draw` and renders its commands into `body`, and nowhere else on the canvas.
@@ -294,8 +352,11 @@ impl WidgetRuntime {
         };
         self.store.data_mut().status.clear();
         self.begin_call();
+        self.store.data_mut().body = (body.w, body.h);
         let scale = ui_px(1000.0);
-        if let Err(e) = draw.call(&mut self.store, (body.w, body.h, scale)) {
+        let called = draw.call(&mut self.store, (body.w, body.h, scale));
+        self.end_call();
+        if let Err(e) = called {
             self.stopped(format!("The widget stopped: {e}"));
             return;
         }
@@ -346,7 +407,9 @@ impl WidgetRuntime {
             Err(_) => return,
         };
         self.begin_call();
-        if tap.call(&mut self.store, (id,)).is_err() {
+        let called = tap.call(&mut self.store, (id,));
+        self.end_call();
+        if called.is_err() {
             self.stopped("The widget stopped while handling a tap.".into());
             return;
         }
@@ -363,7 +426,18 @@ impl WidgetRuntime {
         st.hits.clear();
         st.text_bytes = 0;
         st.state_bytes = 0;
-        let _ = self.store.set_fuel(FUEL_PER_CALL);
+        let _ = self.store.set_fuel(WIDGET_CALL_FUEL);
+    }
+
+    /// After a call: what it took from its budget, whether it ended or was stopped.
+    fn end_call(&mut self) {
+        self.used = WIDGET_CALL_FUEL.saturating_sub(self.store.get_fuel().unwrap_or(0));
+    }
+
+    /// What the last call of the module took from its budget: its own instructions and the charges for the
+    /// host's work. At most WIDGET_CALL_FUEL, which a call that was stopped for it has used up.
+    pub fn fuel_used(&self) -> u64 {
+        self.used
     }
 
     /// A call that trapped (its instructions used up, a limit passed, a fault of the module's own):
@@ -466,6 +540,32 @@ fn past(st: &HostState, limit: &str, max: usize) -> wasmi::Error {
     wasmi::Error::from(TrapCode::OutOfFuel)
 }
 
+/// Takes `n` from the call's instruction budget for work the host does for the call. When the budget cannot
+/// pay, the call ends exactly as a call that used up its instructions ends: nothing is left of the budget,
+/// and the trap is the interpreter's own for that.
+fn charge(caller: &mut Caller<'_, HostState>, n: u64) -> Result<(), wasmi::Error> {
+    let left = caller.get_fuel().unwrap_or(0);
+    if n > left {
+        let _ = caller.set_fuel(0);
+        return Err(wasmi::Error::from(TrapCode::OutOfFuel));
+    }
+    let _ = caller.set_fuel(left - n);
+    Ok(())
+}
+
+/// The pixels of a command's rectangle (body-local) that lie inside the body the call draws on.
+fn area_in_body(st: &HostState, x: i32, y: i32, w: i32, h: i32) -> u64 {
+    let body = Rect { x: 0, y: 0, w: st.body.0, h: st.body.1 };
+    hit_in_body(body, Rect { x, y, w, h }).map_or(0, |r| r.w as u64 * r.h as u64)
+}
+
+/// The charge for drawing a text of `bytes` bytes `px` high, its bytes counted to `square_max` in the square.
+fn text_charge(bytes: usize, px: i32, square_max: u64) -> u64 {
+    let (n, h) = (bytes as u64, px.clamp(1, WIDGET_TEXT_PX_MAX) as u64);
+    let m = n.min(square_max);
+    n * h * h.max(WIDGET_CHARGE_TALL_PX) * WIDGET_CHARGE_TEXT / WIDGET_CHARGE_TALL_PX + WIDGET_CHARGE_SQUARE * m * m
+}
+
 fn room_for_command(st: &HostState) -> Result<(), wasmi::Error> {
     if st.commands.len() >= WIDGET_PASS_COMMANDS_MAX {
         return Err(past(st, "the drawing commands of a pass", WIDGET_PASS_COMMANDS_MAX));
@@ -480,8 +580,9 @@ fn room_for_hit(st: &HostState) -> Result<(), wasmi::Error> {
     Ok(())
 }
 
-/// A command's text, read once its length is within the limits of one text and of the pass.
-fn pass_text(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Result<String, wasmi::Error> {
+/// A command's text, read once its length is within the limits of one text and of the pass and the call's
+/// budget has paid for drawing it `px` high (`text_charge`).
+fn pass_text(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32, px: i32, square_max: u64) -> Result<String, wasmi::Error> {
     let n = len.max(0) as usize;
     let st = caller.data_mut();
     if n > WIDGET_TEXT_MAX {
@@ -491,6 +592,7 @@ fn pass_text(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Result<S
         return Err(past(st, "the bytes of the texts of a pass", WIDGET_PASS_TEXT_MAX));
     }
     st.text_bytes += n;
+    charge(caller, text_charge(n, px, square_max))?;
     Ok(String::from_utf8_lossy(&read_mem(caller, ptr, len)).into_owned())
 }
 

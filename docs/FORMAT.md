@@ -1725,7 +1725,7 @@ manifest's `capabilities` declare: `editor:overlay` for `rect`, `text`, `button`
 capability does nothing (`state_get` returns 0), and no state file is read or written. A manifest
 that does not declare `editor:overlay` is refused by the manifest check, so every package an install
 writes can draw. Each call has a fixed instruction
-budget, a module has one linear memory of at most 32 MiB and at most one table of at most 65,536 entries,
+budget, from which the host's work for each import it calls is paid as well (WIDGETS.md, Limits), a module has one linear memory of at most 32 MiB and at most one table of at most 65,536 entries,
 and a drawing pass holds at most 512 commands, 512
 hit regions and 16 KiB of text (the whole list is in WIDGETS.md, Limits), so a looping or greedy
 widget stops with an error instead of freezing the device.
