@@ -159,11 +159,11 @@ never opened, restored or resized below it, whatever an installed manifest says.
 
 ### Capabilities
 
-A module is given what its manifest's `capabilities` declare, and nothing it does not declare:
+A module has the capabilities its manifest declares, and no other:
 
 | capability | what it gives the module |
 |---|---|
-| `editor:overlay` | drawing in its frame over the notebook: `rect`, `text`, `button` and `hit`, and asking for a drawing pass with `request_redraw`. Every widget package declares it (below) |
+| `editor:overlay` | drawing in its frame over the notebook: `rect`, `text`, `button` and `hit`, and asking for a drawing pass with `request_redraw`. A manifest must declare it (below) |
 | `storage:widget-local` | its own saved state: `state_get`, `state_set` and the file `state/runtime.bin`. Without it `state_get` returns `0`, `state_set` does nothing, and no state file is read or written for the package |
 
 A module may import every function of the ABI whatever it declares; a call it has no capability
@@ -341,8 +341,9 @@ the limits below, and the counts start again with every call:
 
 A length is compared with its limit before the host reads the module's memory. A call that goes past
 the command, hit region, text, status line or state limit is stopped the way a call that runs past
-its instruction budget is: the frame shows the same error in place of its body, the module is not
-called again until the frame is closed and opened, and Grimoire's log names the limit.
+its instruction budget is: the frame shows the same error in place of its body (as much of it as the
+body has room for), the module is not called again until the frame is closed and opened, and
+Grimoire's log names the limit.
 
 A module has one linear memory and at most one table. Memory past 32 MiB and table entries past
 65,536 are not given: `memory.grow` and `table.grow` fail, as WebAssembly defines it (they return
@@ -371,8 +372,12 @@ and one by size where the work grows with what the import is given.
 
 A call whose budget cannot pay a charge ends exactly as a call that ran out of instructions: its frame
 shows the same error, and nothing of the pass is drawn. A call of an import the package has no
-capability for pays the fixed charge and returns. The charges are set so that the host's work for a
-call takes, at most, a few times as long as the budget's worth of the module's own instructions.
+capability for pays the fixed charge and returns.
+
+The charges were set by measuring, in a release build on a desktop machine, what each import's work
+costs beside a module's own instructions. There, the longest drawing a budget pays for takes about
+three times as long as the same budget spent on instructions alone. They have not been measured on a
+Kindle.
 
 Some sums, for a sense of scale:
 
@@ -402,7 +407,8 @@ Each time a frame opens, before the module is loaded, its file is checked again:
 
 - the installed manifest's `artifact.path` is still a path the manifest check takes, and the index
   (`packages/index.json`) names the same file, `packages/widgets/<id>/<artifact.path>`;
-- it is a plain file inside the package's own folder, with no link in its place or on the way to it;
+- it is a plain file inside the package's own folder, with no link in its place or between the
+  package's folder and it;
 - it is no larger than 32 MiB, and its SHA-256 is the `sha` the index recorded when the package was
   installed.
 

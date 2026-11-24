@@ -36,11 +36,11 @@
 //! `style` is 0 (normal), 1 (selected) or 2 (disabled). Strings are UTF-8 in the module's memory.
 //! `setting` and `state_get` return the number of bytes written, at most `out_cap` / `cap`.
 //!
-//! A module is given what its manifest's `capabilities` declare and no more (docs/WIDGETS.md):
+//! A module has the capabilities its manifest declares and no other (docs/WIDGETS.md):
 //! `editor:overlay` is the drawing in the frame (`rect`, `text`, `button`, `hit`, and `request_redraw`,
 //! which asks for a drawing pass), and `storage:widget-local` the saved state (`state_get`,
 //! `state_set`, the state file). Without the capability the call is still there to link against, and
-//! does nothing.
+//! does nothing. `status`, `setting` and `now` need none.
 
 use crate::prelude::*;
 use crate::widgetpkg::{WIDGET_CAP_OVERLAY, WIDGET_CAP_STORAGE};
@@ -51,10 +51,11 @@ const STATE_FILE: &str = "state/runtime.bin";
 
 // ---- the limits: what one package, one call and one drawing pass may ask for (docs/WIDGETS.md, Limits) ----
 //
-// The host calls a module's `widget_draw` (a drawing pass) and `widget_tap`. Every number by which a
-// module makes the host work or keep memory is one of these. The counts start at nothing with each
-// call, a count or a length is compared with its limit before the module's memory is read, and a
-// call that goes past one is stopped as a call that used up its instructions is (`past`).
+// The host calls a module's `widget_draw` (a drawing pass) and `widget_tap`. These are the numbers by
+// which the host counts what a call asks of it, and what a module may hold. The counts start at
+// nothing with each call, a count or a length is compared with its limit before the module's memory
+// is read, and a call that goes past one is stopped as a call that used up its instructions is
+// (`past`).
 
 // (The module's file is at most WIDGET_PKG_ARTIFACT_MAX, widgetpkg.rs.)
 /// A module has one linear memory, and it may not grow past this.
@@ -96,9 +97,10 @@ pub const WIDGET_TEXT_PX_MAX: i32 = 512;
 // The budget counts the module's instructions. The host's work for an import is no instruction of the
 // module's, so each import takes a charge for it from the same budget (`charge`): a fixed one for every
 // call, and one by size where the work grows with what the import is given. The numbers are in
-// instructions: about what the work costs beside a module's own, measured in a release build, so that
-// the longest drawing a budget pays for takes a few times as long as the budget's worth of instructions.
-// When the budget cannot pay, the call ends exactly as a call that used up its instructions ends.
+// instructions: about what the work costs beside a module's own, as measured in a release build on a
+// desktop machine, where the longest drawing a budget pays for takes about three times as long as the
+// same budget spent on instructions alone (not measured on a Kindle). When the budget cannot pay, the
+// call ends exactly as a call that used up its instructions ends.
 
 /// Every call of an import, whatever it is given and whether or not the package has the capability for it.
 pub const WIDGET_CHARGE_CALL: u64 = 500;
@@ -115,8 +117,8 @@ pub const WIDGET_CHARGE_TEXT: u64 = 32;
 pub const WIDGET_CHARGE_TALL_PX: u64 = 64;
 /// `text`, and a label: this for the square of its bytes. A text that does not fit its line is cut short,
 /// and a label is broken into two lines, by steps that each measure the text again. A `text` is cut to
-/// its first WIDGET_CHARGE_SQUARE_BYTES bytes before those steps, so its bytes are counted to that many;
-/// a label's are all counted.
+/// its first 251 bytes before those steps (font.rs, `fit`), so its bytes are counted to
+/// WIDGET_CHARGE_SQUARE_BYTES at most; a label's are all counted.
 pub const WIDGET_CHARGE_SQUARE: u64 = 16;
 pub const WIDGET_CHARGE_SQUARE_BYTES: u64 = 256;
 /// `status`, `setting`, `state_get`, `state_set`: each byte read from the module's memory or written to it.
