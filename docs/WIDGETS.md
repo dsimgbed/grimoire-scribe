@@ -421,6 +421,16 @@ have them. The fixtures and scenarios under `tests/` are the working examples:
   then checks the open frame and a newly opened one.
 - `tests/scenarios/z_widget_packages.qs` drives install, update, license and remove through the
   package manager.
+- `tests/fixtures/widgethost/` holds six small packages for the host's own rules. Their modules are
+  written byte by byte by `rust/tests/widgetfix` (`make widget-fixtures` writes the folder, and
+  `rust/tests/test_widget_fixtures.rs` checks it is what the writer makes), so each can pass the
+  host exactly the numbers its rule is about.
+- `tests/scenarios/z_widget_host.qs` opens each of them: one that draws far outside its body, one
+  that declares no capability, one a command past a pass's limit, one whose file is not the one
+  installed, one resized to the smallest frame, and one whose id is 128 bytes long.
+  `z_widget_host_kept.qs` starts Grimoire again on that data and finds the last one's frame.
+- `rust/tests/test_widget_host.rs` holds the same rules as unit tests of the host, pixel by pixel
+  and limit by limit.
 
 A scenario can copy a fixture into a fresh data root:
 
