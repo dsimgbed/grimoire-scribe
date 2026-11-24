@@ -296,9 +296,9 @@ module may call `state_set` during a tap or a draw; the host writes the state fi
 at `packages/widgets/<id>/state/runtime.bin`. For a timer or a sticky note, that is the whole
 persistence model.
 
-Each call runs with a fixed instruction budget, and a module's linear memory may grow to at most
-32 MiB. A module that loops past the budget is stopped and its frame shows the error instead of
-freezing Grimoire. Imports outside the `grimoire` module fail to link, and the module has no
+Each call runs with a fixed instruction budget, and a module has one linear memory, which may
+grow to at most 32 MiB. A module that loops past the budget is stopped and its frame shows the
+error instead of freezing Grimoire. Imports outside the `grimoire` module fail to link, and the module has no
 filesystem, network or process access.
 
 ### Limits
@@ -309,7 +309,8 @@ the limits below, and the counts start again with every call:
 | limit | |
 |---|---|
 | instructions in one call | 20,000,000 |
-| the module's memory | 32 MiB |
+| the module's memories | 1, of at most 32 MiB (512 pages) |
+| the module's tables | 1, of at most 65,536 entries |
 | drawing commands in one pass (`rect`, `text` and `button` together) | 512 |
 | hit regions in one pass (`button` and `hit` together) | 512 |
 | bytes of one text (a `text`'s, or a `button`'s label) | 1,024 |
@@ -324,8 +325,12 @@ the limits below, and the counts start again with every call:
 A length is compared with its limit before the host reads the module's memory. A call that goes past
 the command, hit region, text, status line or state limit is stopped the way a call that runs past
 its instruction budget is: the frame shows the same error in place of its body, the module is not
-called again until the frame is closed and opened, and Grimoire's log names the limit. Memory
-past 32 MiB is not given: `memory.grow` fails, as WebAssembly defines it.
+called again until the frame is closed and opened, and Grimoire's log names the limit.
+
+A module has one linear memory and at most one table. Memory past 32 MiB and table entries past
+65,536 are not given: `memory.grow` and `table.grow` fail, as WebAssembly defines it (they return
+`-1`), and the module runs on. A module that declares a second memory or a second table, or one that
+starts larger than its limit, is not started: its frame says that the widget could not start.
 
 The limits leave room. The calculator package of `tests/fixtures/widgetcalc/` draws at most 39
 commands, 37 hit regions and 118 bytes of text in a pass, with a status line of 47 bytes, in about

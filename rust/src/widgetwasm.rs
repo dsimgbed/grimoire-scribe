@@ -57,8 +57,16 @@ const STATE_FILE: &str = "state/runtime.bin";
 // call that goes past one is stopped as a call that used up its instructions is (`past`).
 
 // (The module's file is at most WIDGET_PKG_ARTIFACT_MAX, widgetpkg.rs.)
-/// A widget's linear memory may not grow past this, so one package cannot exhaust the device.
+/// A module has one linear memory, and it may not grow past this.
 const MEMORY_MAX: usize = 32 * 1024 * 1024;
+/// A module has at most one table, of at most this many entries (the function references its indirect
+/// calls go through), and a store holds one instance of one module. A module that declares a second
+/// memory or table, or one larger than its limit, is not started; `memory.grow` and `table.grow` past
+/// a limit fail as WebAssembly defines it (they return -1), and the module runs on.
+pub const WIDGET_TABLE_MAX: usize = 65_536;
+const MEMORIES_MAX: usize = 1;
+const TABLES_MAX: usize = 1;
+const INSTANCES_MAX: usize = 1;
 /// A widget gets this many instructions per call. A drawing pass that needs more is looping.
 const FUEL_PER_CALL: u64 = 20_000_000;
 /// The saved state: `state_set` keeps the first this many bytes.
@@ -168,7 +176,13 @@ impl WidgetRuntime {
             settings,
             status: String::new(),
             dirty: false,
-            limits: StoreLimitsBuilder::new().memory_size(MEMORY_MAX).build(),
+            limits: StoreLimitsBuilder::new()
+                .memory_size(MEMORY_MAX)
+                .memories(MEMORIES_MAX)
+                .tables(TABLES_MAX)
+                .table_elements(WIDGET_TABLE_MAX)
+                .instances(INSTANCES_MAX)
+                .build(),
             redraw_at: None,
         });
         store.limiter(|st| &mut st.limits);

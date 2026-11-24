@@ -1723,7 +1723,8 @@ the text read back by the editor's `editor.widget.N.status` probe. A module is g
 manifest's `capabilities` declare: `editor:overlay` for `rect`, `text`, `button` and `hit`, and
 `storage:widget-local` for `state_get`, `state_set` and `state/runtime.bin`; a call without its
 capability does nothing (`state_get` returns 0), and no state file is read or written. Each call has a fixed instruction
-budget and linear memory is capped at 32 MiB, and a drawing pass holds at most 512 commands, 512
+budget, a module has one linear memory of at most 32 MiB and at most one table of at most 65,536 entries,
+and a drawing pass holds at most 512 commands, 512
 hit regions and 16 KiB of text (the whole list is in WIDGETS.md, Limits), so a looping or greedy
 widget stops with an error instead of freezing the device.
 
