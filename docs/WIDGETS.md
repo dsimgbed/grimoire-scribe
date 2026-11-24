@@ -302,7 +302,7 @@ body, is a tap on no region.
 | `button` | a button with its own label; it is also a hit region with `id` |
 | `hit` | a hit region with `id`, without drawing anything |
 | `status` | the text the editor's `editor.widget.N.status` probe reads, for tests and debugging |
-| `request_redraw` | asks for `widget_draw` again after `after_ms` (100 to 86,400,000; a value outside is taken as the nearer end); a clock calls it once per draw, and a package that never calls it is only drawn when something else repaints. When the time has come the frame is drawn again and its rectangle is refreshed once. A minimized frame draws no body, so its request waits until the frame is restored, and a request waits while a finger or the pen is down or a menu or sheet is open |
+| `request_redraw` | asks for `widget_draw` again after `after_ms` (100 to 86,400,000; a value outside is taken as the nearer end); a clock calls it once per draw, and a package that never calls it is only drawn when something else repaints. When the time has come the frame is drawn again and its rectangle is refreshed once. A minimized frame draws no body, so its request waits until the frame is restored, and a request waits while a finger or the pen is down or a menu or sheet is open. A redraw also waits while the pen is writing or near the screen, and comes once when the pen has left |
 | `setting` | copies one saved setting's value into `out_ptr` and returns its byte length, or `0`; `out_cap` caps the copy |
 | `state_get` | copies the saved state into `ptr` and returns its byte length, or `0`; `cap` caps the copy. `state_get` and `state_set` need `storage:widget-local` |
 | `state_set` | replaces the saved state with the bytes at `ptr`; the first 64 KiB are kept |
@@ -501,6 +501,10 @@ have them. The fixtures and scenarios under `tests/` are the working examples:
   used up and whose frame, the default size, says the reason first; and one that asks to be drawn again each second, whose passes and refreshes are counted
   while its frame is open and while it is minimized, and again in a package that declares no
   capability.
+- `tests/scenarios/z_widget_pen.qs` opens the one that asks to be drawn again each second and brings
+  the pen: no pass and no refresh of the frame while the pen is near, while it writes, and after a
+  lift with the pen still near; one pass and one refresh when the pen has left; and a pen's tap on
+  the frame, which is drawn at its lift.
 - `rust/tests/test_widget_host.rs` holds the same rules as unit tests of the host, pixel by pixel
   and limit by limit.
 
