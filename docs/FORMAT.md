@@ -1617,7 +1617,7 @@ license_url: https://example.org/timer/LICENSE  # optional; without it, the repo
 min_grimoire_version: 2.1.0    # optional
 platforms: [all]               # or kindle-scribe-2022, kindle-scribe-2024
 repository: https://example.org/timer
-capabilities: [editor:overlay, storage:widget-local]
+capabilities: [editor:overlay, storage:widget-local]  # editor:overlay is required; the other is for saved state
 settings:                      # optional; a Settings... page of up to 32 rows
   - key: show_seconds          # lowercase letters, digits, . - _
     label: Show seconds
@@ -1722,7 +1722,9 @@ widget's saved state in `packages/widgets/<id>/state/runtime.bin`, capped at 64 
 the text read back by the editor's `editor.widget.N.status` probe. A module is given only what the
 manifest's `capabilities` declare: `editor:overlay` for `rect`, `text`, `button` and `hit`, and
 `storage:widget-local` for `state_get`, `state_set` and `state/runtime.bin`; a call without its
-capability does nothing (`state_get` returns 0), and no state file is read or written. Each call has a fixed instruction
+capability does nothing (`state_get` returns 0), and no state file is read or written. A manifest
+that does not declare `editor:overlay` is refused by the manifest check, so every package an install
+writes can draw. Each call has a fixed instruction
 budget, a module has one linear memory of at most 32 MiB and at most one table of at most 65,536 entries,
 and a drawing pass holds at most 512 commands, 512
 hit regions and 16 KiB of text (the whole list is in WIDGETS.md, Limits), so a looping or greedy

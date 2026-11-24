@@ -24,6 +24,16 @@ fn installed(id: &str, capabilities: &[&str], module: &[u8]) -> WidgetRuntime {
     WidgetRuntime::new(id).unwrap()
 }
 
+/// A package as an earlier install left it, from before the manifest check asked for `editor:overlay`: installed,
+/// and its manifest then declaring these capabilities only. Loaded as it is.
+fn installed_earlier(id: &str, capabilities: &[&str], module: &[u8]) -> WidgetRuntime {
+    let m = manifest(id, "Test", &BOTH, FIXED_400_300, module);
+    widget_package_install(&m, module, "", 1860, 2480).unwrap();
+    let yaml = std::path::PathBuf::from(format!("{}/package.yaml", widget_package_dir(id)));
+    rewrite(&yaml, "capabilities: [editor:overlay, storage:widget-local]", &format!("capabilities: [{}]", capabilities.join(", ")));
+    WidgetRuntime::new(id).unwrap()
+}
+
 /// A canvas with no two neighbours alike, so that any pixel a draw changes shows.
 fn patterned(w: i32, h: i32) -> Canvas {
     let mut c = Canvas::default();
@@ -211,8 +221,9 @@ fn a_package_without_the_storage_capability_has_no_saved_state() {
 #[test]
 fn a_package_without_the_overlay_capability_draws_nothing() {
     let root = fresh_root("overlay");
+    // (no install gives such a package now: these are as an install before that rule left them)
     for (id, capabilities) in [("test.unseen", &["storage:widget-local"][..]), ("test.bare", &[][..])] {
-        let mut rt = installed(id, capabilities, &keeps());
+        let mut rt = installed_earlier(id, capabilities, &keeps());
         let before = patterned(700, 600);
         let mut c = before.clone();
         for pass in 0..2 {
@@ -484,6 +495,62 @@ fn request_redraw_has_a_shortest_and_a_longest_delay() {
     rt.draw(&mut c, BODY);
     assert_eq!(rt.error(), Some(STOPPED));
     assert!(!rt.redraw_due(after(now_ms(), WIDGET_REDRAW_MAX_MS)));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The calculator package of tests/fixtures/widgetcalc: its manifest and its module.
+fn calculator() -> (String, Vec<u8>) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/widgetcalc/packages/widgets/com.grimoire.calculator");
+    (std::fs::read_to_string(dir.join("package.yaml")).unwrap(), std::fs::read(dir.join("calculator.bin")).unwrap())
+}
+
+#[test]
+fn a_widget_manifest_declares_the_overlay_capability() {
+    let root = fresh_root("declares");
+    let refused = "`capabilities` must declare `editor:overlay`; without it nothing a widget draws is shown";
+    let (fixture, module) = calculator();
+    let both = "capabilities: [editor:overlay, storage:widget-local]\n";
+    assert!(fixture.contains(both));
+    // The calculator's manifest as its repository had it at version 1.2.0: the fixture's with its repository's
+    // address and an empty list of capabilities. The manifest check refuses it, which is before anything is
+    // asked of the reader or written.
+    let with_address = fixture.replace("license: MIT\n", "license: MIT\nrepository: https://github.com/nebuff/gri-calc\n");
+    let published = with_address.replace(both, "capabilities: []\n");
+    let folder = root.join("packages/widgets/com.grimoire.calculator");
+    for (what, m) in [("an empty list", published.clone()), ("no list", with_address.replace(both, "")), ("the storage alone", with_address.replace(both, "capabilities: [storage:widget-local]\n"))] {
+        let p = widget_package_parse(&m).unwrap();
+        assert_eq!(widget_package_validate(&p, 1860, 2480), Err(refused.to_string()), "{what}");
+        assert_eq!(widget_package_install(&m, &module, "", 1860, 2480).err().as_deref(), Some(refused), "{what}");
+        assert!(!folder.exists() && widget_package_installed("com.grimoire.calculator").is_none(), "{what}: nothing is installed");
+    }
+    // The same manifest with both capabilities installs, and its frame draws: the calculator's display and keys.
+    widget_package_install(&with_address, &module, "", 1860, 2480).unwrap();
+    let mut h = WidgetHost::new();
+    let area = Rect { x: 0, y: 0, w: 1860, h: 2480 };
+    assert!(h.spawn(widget_def("com.grimoire.calculator").unwrap(), area, Rect { x: 1700, y: 220, w: 128, h: 1700 }));
+    let body = h.frames[0].body_rect();
+    let mut rt = WidgetRuntime::new("com.grimoire.calculator").unwrap();
+    let before = patterned(1860, 2480);
+    let mut c = before.clone();
+    rt.draw(&mut c, body);
+    assert_eq!(rt.error(), None);
+    assert!(inked(&c, body) > 10_000 && rt.hit_count() > 10 && rt.text().contains('7'), "{} dark pixels, {} hit regions, {:?}", inked(&c, body), rt.hit_count(), rt.text());
+    assert_eq!(changed_outside(&before, &c, body), 0);
+    // (and it keeps its state: a tap on a key, a pass, and the file is there)
+    let key = rt.hit(rt.hit_count() as i32 / 2).or_else(|| rt.hit(0)).or_else(|| rt.hit(1)).unwrap();
+    rt.tap(key.x + key.w / 2, key.y + key.h / 2);
+    rt.draw(&mut c, body);
+    assert_eq!(rt.error(), None);
+    assert!(folder.join("state/runtime.bin").exists());
+    // With the capability to draw alone it installs and draws too, and keeps no state.
+    widget_package_remove("com.grimoire.calculator", false).unwrap();
+    widget_package_install(&with_address.replace(both, "capabilities: [editor:overlay]\n"), &module, "", 1860, 2480).unwrap();
+    let mut rt = WidgetRuntime::new("com.grimoire.calculator").unwrap();
+    let mut c = before.clone();
+    rt.draw(&mut c, body);
+    assert!(rt.error().is_none() && inked(&c, body) > 10_000 && rt.hit_count() > 10);
+    assert!(!folder.join("state").exists());
+    widget_catalog_invalidate();
     let _ = std::fs::remove_dir_all(&root);
 }
 

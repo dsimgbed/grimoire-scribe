@@ -681,7 +681,7 @@ mod tests {
     /// A manifest with this id and nothing a frame needs beyond it.
     fn manifest_of(id: &str) -> String {
         format!(
-            "name: Long\nid: {id}\ntype: widget\nversion: 1.0.0\nartifact:\n  path: w.bin\n  sha256: {}\n  size: 4\nspec:\n  runtime: wasm\n",
+            "name: Long\nid: {id}\ntype: widget\nversion: 1.0.0\ncapabilities: [editor:overlay]\nartifact:\n  path: w.bin\n  sha256: {}\n  size: 4\nspec:\n  runtime: wasm\n",
             crate::sha256::sha256_of(b"test")
         )
     }

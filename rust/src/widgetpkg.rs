@@ -721,7 +721,8 @@ fn path_ok(p: &str) -> bool {
 }
 
 /// The capabilities a manifest may declare, and what the host gives a module for each (widgetwasm.rs):
-/// drawing in its frame over the notebook, and its own saved state.
+/// drawing in its frame over the notebook, and its own saved state. A widget's manifest declares the first
+/// (`widget_package_validate` refuses one that does not); the second is for a widget that saves something.
 pub const WIDGET_CAP_OVERLAY: &str = "editor:overlay";
 pub const WIDGET_CAP_STORAGE: &str = "storage:widget-local";
 
@@ -782,6 +783,10 @@ pub fn widget_package_validate(p: &WidgetPackage, canvas_w: i32, canvas_h: i32) 
         if !cap_ok(c) {
             return Err(format!("Unknown capability '{c}'."));
         }
+    }
+    // (a widget is a frame its module draws in: one that could draw nothing is not installed)
+    if !p.capabilities.iter().any(|c| c == WIDGET_CAP_OVERLAY) {
+        return Err(format!("`capabilities` must declare `{WIDGET_CAP_OVERLAY}`; without it nothing a widget draws is shown"));
     }
     if p.spec.runtime != "wasm" {
         return Err("`spec.runtime` must be `wasm`; Grimoire does not run native widget code".into());
@@ -1754,6 +1759,10 @@ spec:
         assert_eq!(p.spec.size.default, (220, 160));
         assert_eq!(p.spec.size.mode, WidgetSizeMode::Resizable);
         widget_package_validate(&p, 1860, 2480).unwrap();
+        // (the capability to draw alone is a whole list: a widget that saves nothing)
+        let p = widget_package_parse(&manifest("com.example.test").replace(", storage:widget-local]", "]")).unwrap();
+        assert_eq!(p.capabilities, ["editor:overlay"]);
+        widget_package_validate(&p, 1860, 2480).unwrap();
     }
 
     #[test]
@@ -1765,6 +1774,11 @@ spec:
             (good.replace("com.example.test", "Bad Id"), "lowercase"),
             (good.replace("platforms: [all]", "platforms: [kindle-oasis]"), "Unknown platform"),
             (good.replace("capabilities: [editor:overlay, storage:widget-local]", "capabilities: [net]"), "Unknown capability"),
+            (good.replace("capabilities: [editor:overlay, storage:widget-local]", "capabilities: [editor:overlay, net]"), "Unknown capability"),
+            // (a widget draws in its frame: its manifest says so)
+            (good.replace("capabilities: [editor:overlay, storage:widget-local]", "capabilities: []"), "`capabilities` must declare `editor:overlay`"),
+            (good.replace("capabilities: [editor:overlay, storage:widget-local]", "capabilities: [storage:widget-local]"), "`capabilities` must declare `editor:overlay`"),
+            (good.replace("capabilities: [editor:overlay, storage:widget-local]\n", ""), "`capabilities` must declare `editor:overlay`"),
             (good.replace("path: dist/widget.bin", "path: package.yaml"), "safe relative path"),
             (good.replace("path: dist/widget.bin", "path: state/widget.bin"), "safe relative path"),
             (good.replace("path: dist/widget.bin", "path: ../widget.bin"), "safe relative path"),
