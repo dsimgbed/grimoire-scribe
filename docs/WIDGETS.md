@@ -163,11 +163,11 @@ A module is given what its manifest's `capabilities` declare, and nothing it doe
 
 | capability | what it gives the module |
 |---|---|
-| `editor:overlay` | drawing in its frame over the notebook: `rect`, `text`, `button` and `hit`. Every widget package declares it (below) |
+| `editor:overlay` | drawing in its frame over the notebook: `rect`, `text`, `button` and `hit`, and asking for a drawing pass with `request_redraw`. Every widget package declares it (below) |
 | `storage:widget-local` | its own saved state: `state_get`, `state_set` and the file `state/runtime.bin`. Without it `state_get` returns `0`, `state_set` does nothing, and no state file is read or written for the package |
 
 A module may import every function of the ABI whatever it declares; a call it has no capability
-for returns at once. `status`, `request_redraw`, `setting` and `now` need no capability. The
+for returns at once. `status`, `setting` and `now` need no capability. The
 package's settings are the reader's, changed on its Settings page and kept by the host with or
 without `storage:widget-local`.
 
@@ -188,8 +188,9 @@ capabilities: [editor:overlay, storage:widget-local]
 ```
 
 A package that an earlier build installed without `editor:overlay` stays installed and still opens:
-`rect`, `text`, `button` and `hit` do nothing for it, so its frame has an empty body and no hit
-regions, and Grimoire's log says that the manifest does not declare the capability. It draws again
+`rect`, `text`, `button`, `hit` and `request_redraw` do nothing for it, so its frame has an empty
+body and no hit regions and is not drawn again for the module's asking, and Grimoire's log says that
+the manifest does not declare the capability. It draws again
 once it is updated to a version that declares it.
 
 ### Settings
@@ -293,7 +294,7 @@ body, is a tap on no region.
 
 | import | |
 |---|---|
-| `rect` | a rectangle in the frame; `style` is `0` normal, `1` selected or `2` disabled. `rect`, `text`, `button` and `hit` need `editor:overlay` |
+| `rect` | a rectangle in the frame; `style` is `0` normal, `1` selected or `2` disabled. `rect`, `text`, `button`, `hit` and `request_redraw` need `editor:overlay` |
 | `text` | UTF-8 text at `ptr`, `len` in the module's memory, `px` high (1 to 512: a smaller or larger value is drawn at the nearer end), centered when `center` is nonzero |
 | `button` | a button with its own label; it is also a hit region with `id` |
 | `hit` | a hit region with `id`, without drawing anything |
@@ -453,7 +454,8 @@ have them. The fixtures and scenarios under `tests/` are the working examples:
   written the same way, and `tests/scenarios/z_widget_runs.qs` opens them with app time on the
   script's clock: one whose drawing pass never ends, which is stopped when its instruction budget is
   used up, and one that asks to be drawn again each second, whose passes and refreshes are counted
-  while its frame is open and while it is minimized.
+  while its frame is open and while it is minimized, and again in a package that declares no
+  capability.
 - `rust/tests/test_widget_host.rs` holds the same rules as unit tests of the host, pixel by pixel
   and limit by limit.
 

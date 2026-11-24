@@ -86,4 +86,22 @@ expect display.presents is ui 1456 28 220 160
 tap panel widget.0.close
 wait 300
 expect editor.widgets is 0
+# Bare is the same module in a package whose manifest declares no capability (no install writes such a package
+# now; an earlier one could have). Asking for a redraw needs the capability to draw: its module has the one pass
+# that opening the frame gives it, and in three seconds no other, and nothing is refreshed.
+tap panel widgets
+wait 300
+tap panel widgets.test.runs.bare
+wait 400
+expect editor.widgets is 1 test.runs.bare
+expect editor.widget.0.error is
+expect editor.widget.0.status is 1
+expect display.dark.1470.100.192.74 is 0
+expect display.presents not -1
+wait 3000
+expect editor.widget.0.status is 1
+expect display.presents is
+tap panel widget.0.close
+wait 300
+expect editor.widgets is 0
 quit

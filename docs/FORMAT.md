@@ -1720,7 +1720,7 @@ host draws the widget again (100 ms to 24 hours), for a clock or a countdown. `s
 the package's saved settings (empty when it is missing); `state_get`/`state_set` read and write the
 widget's saved state in `packages/widgets/<id>/state/runtime.bin`, capped at 64 KiB. `status` sets
 the text read back by the editor's `editor.widget.N.status` probe. A module is given only what the
-manifest's `capabilities` declare: `editor:overlay` for `rect`, `text`, `button` and `hit`, and
+manifest's `capabilities` declare: `editor:overlay` for `rect`, `text`, `button`, `hit` and `request_redraw`, and
 `storage:widget-local` for `state_get`, `state_set` and `state/runtime.bin`; a call without its
 capability does nothing (`state_get` returns 0), and no state file is read or written. A manifest
 that does not declare `editor:overlay` is refused by the manifest check, so every package an install

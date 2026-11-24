@@ -37,9 +37,10 @@
 //! `setting` and `state_get` return the number of bytes written, at most `out_cap` / `cap`.
 //!
 //! A module is given what its manifest's `capabilities` declare and no more (docs/WIDGETS.md):
-//! `editor:overlay` is the drawing in the frame (`rect`, `text`, `button`, `hit`), and
-//! `storage:widget-local` the saved state (`state_get`, `state_set`, the state file). Without the
-//! capability the call is still there to link against, and does nothing.
+//! `editor:overlay` is the drawing in the frame (`rect`, `text`, `button`, `hit`, and `request_redraw`,
+//! which asks for a drawing pass), and `storage:widget-local` the saved state (`state_get`,
+//! `state_set`, the state file). Without the capability the call is still there to link against, and
+//! does nothing.
 
 use crate::prelude::*;
 use crate::widgetpkg::{WIDGET_CAP_OVERLAY, WIDGET_CAP_STORAGE};
@@ -105,7 +106,8 @@ enum DrawCmd {
 struct HostState {
     /// the package's id, for the log
     id: String,
-    /// the manifest declares `editor:overlay`: the drawing calls and hit regions are recorded
+    /// the manifest declares `editor:overlay`: the drawing calls and hit regions are recorded, and a
+    /// redraw may be asked for
     overlay: bool,
     /// the manifest declares `storage:widget-local`: the state is read, kept and saved
     storage: bool,
@@ -234,8 +236,11 @@ impl WidgetRuntime {
             Ok(())
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "request_redraw", |mut caller: Caller<'_, HostState>, after_ms: i32| {
-            let after_ms = after_ms.clamp(WIDGET_REDRAW_MIN_MS, WIDGET_REDRAW_MAX_MS) as u32;
-            caller.data_mut().redraw_at = Some(now_ms().wrapping_add(after_ms));
+            // (a pass is drawing: a package that may not draw is not drawn again for the asking)
+            if caller.data().overlay {
+                let after_ms = after_ms.clamp(WIDGET_REDRAW_MIN_MS, WIDGET_REDRAW_MAX_MS) as u32;
+                caller.data_mut().redraw_at = Some(now_ms().wrapping_add(after_ms));
+            }
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "setting", |mut caller: Caller<'_, HostState>, key_ptr: i32, key_len: i32, out_ptr: i32, out_cap: i32| -> i32 {
             // (no setting has a longer key: nothing is read for one)

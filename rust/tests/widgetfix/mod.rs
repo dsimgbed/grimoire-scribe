@@ -492,6 +492,8 @@ pub fn packages_that_run() -> Vec<Package> {
         package("test.runs.loop", "Loop", &BOTH, UNSIZED, loops()),
         // (it asks to be drawn again a second after each pass)
         package("test.runs.ticker", "Ticker", &BOTH, UNSIZED, ticker(1000)),
+        // (the same module, in a package that declares no capability, as an earlier install could leave one)
+        package("test.runs.bare", "Bare", &[], UNSIZED, ticker(1000)),
     ]
 }
 

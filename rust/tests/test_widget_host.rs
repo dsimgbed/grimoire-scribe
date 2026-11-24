@@ -245,6 +245,18 @@ fn a_package_without_the_overlay_capability_draws_nothing() {
     rt.draw(&mut c, BODY);
     assert_ne!(inked(&c, BODY), 0);
     assert_eq!((rt.hit_count(), rt.text().as_str()), (1, "hello"));
+    // A drawing pass is asked for with the same capability: without it request_redraw brings none, ever.
+    let ever = WIDGET_REDRAW_MAX_MS as u32;
+    for (id, capabilities, asked) in [("test.asks.bare", &[][..], false), ("test.asks.storage", &["storage:widget-local"][..], false), ("test.asks.overlay", &["editor:overlay"][..], true)] {
+        let mut rt = installed_earlier(id, capabilities, &ticker(100));
+        for pass in 1..=2 {
+            rt.draw(&mut c, BODY);
+            assert_eq!(rt.error(), None, "{id}");
+            assert_eq!(rt.status(), pass.to_string(), "{id}: the module ran");
+            assert_eq!(rt.redraw_due(now_ms().wrapping_add(ever)), asked, "{id}");
+            assert_eq!(rt.redraw_taken(now_ms().wrapping_add(100)), asked, "{id}");
+        }
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 
