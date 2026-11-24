@@ -862,6 +862,38 @@ fn a_module_is_checked_again_before_each_load() {
     assert_eq!(load("test.load").as_deref(), Some(NOT_READ), "the index names another file than the manifest");
     rewrite(&index, "test.load/copy.bin", "test.load/module.bin");
     assert_eq!(load("test.load"), None);
+    // The index and the manifest agreeing on a file the rule for artifact.path does not take: the path is asked
+    // again at the load, whatever the index says. The state folder, in any case of its letters (a storage that
+    // ignores case finds it by each), with the module's own bytes there:
+    for path in ["state/runtime.bin", "STATE/runtime.bin", "State/settings.json", "sTaTe/module.bin"] {
+        let at = dir.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, &module).unwrap();
+        rewrite(&yaml, "path: module.bin", &format!("path: {path}"));
+        rewrite(&index, "test.load/module.bin", &format!("test.load/{path}"));
+        assert_eq!(load("test.load").as_deref(), Some(NOT_READ), "artifact.path and the index: {path}");
+        rewrite(&yaml, &format!("path: {path}"), "path: module.bin");
+        rewrite(&index, &format!("test.load/{path}"), "test.load/module.bin");
+        std::fs::remove_file(&at).unwrap();
+    }
+    let _ = std::fs::remove_dir_all(dir.join("state"));
+    let _ = std::fs::remove_dir_all(dir.join("STATE"));
+    let _ = std::fs::remove_dir_all(dir.join("State"));
+    let _ = std::fs::remove_dir_all(dir.join("sTaTe"));
+    // The manifest itself, in another case of its letters, with the index recording the manifest's own SHA-256:
+    // no file of that name is read as a module.
+    for path in ["Package.yaml", "PACKAGE.YAML"] {
+        rewrite(&yaml, "path: module.bin", &format!("path: {path}"));
+        rewrite(&index, "test.load/module.bin", &format!("test.load/{path}"));
+        let own = grimoire::sha256::sha256_of(&std::fs::read(&yaml).unwrap());
+        let recorded = grimoire::sha256::sha256_of(&module);
+        rewrite(&index, &format!("\"sha\":\"{recorded}\""), &format!("\"sha\":\"{own}\""));
+        assert_eq!(load("test.load").as_deref(), Some(NOT_READ), "artifact.path and the index: {path}");
+        rewrite(&index, &format!("\"sha\":\"{own}\""), &format!("\"sha\":\"{recorded}\""));
+        rewrite(&yaml, &format!("path: {path}"), "path: module.bin");
+        rewrite(&index, &format!("test.load/{path}"), "test.load/module.bin");
+    }
+    assert_eq!(load("test.load"), None);
 
     // The index's record of the file: another digest, none, and the same one in capitals.
     let sha = grimoire::sha256::sha256_of(&module);

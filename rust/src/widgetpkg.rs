@@ -728,13 +728,14 @@ pub const WIDGET_CAP_STORAGE: &str = "storage:widget-local";
 
 /// Whether `artifact.path` may name a package's module: a relative path inside the package's folder (`path_ok`)
 /// that is neither the manifest nor anything of `state/`, and whose names the storage walk takes
-/// (`StoragePath::walked`), since the module is read through that walk when it is loaded. The manifest check and
-/// the load ask this one question, so a path that installs is a path that loads.
+/// (`StoragePath::walked`), since the module is read through that walk when it is loaded. The manifest and the
+/// state folder are named without regard to the case of ASCII letters, as a storage that ignores case finds
+/// them (`Package.yaml`, `STATE/x`). The manifest check and the load ask this one question, so a path that
+/// installs is a path that loads.
 fn artifact_path_ok(p: &str) -> bool {
     path_ok(p)
-        && p != "package.yaml"
-        && p != "state"
-        && !p.starts_with("state/")
+        && !p.eq_ignore_ascii_case("package.yaml")
+        && !p.split('/').next().is_some_and(|first| first.eq_ignore_ascii_case("state"))
         && crate::fsview::StoragePath::new(p.as_bytes()).is_some_and(|sp| sp.walked())
 }
 
@@ -1759,6 +1760,11 @@ spec:
         assert_eq!(p.spec.size.default, (220, 160));
         assert_eq!(p.spec.size.mode, WidgetSizeMode::Resizable);
         widget_package_validate(&p, 1860, 2480).unwrap();
+        // (a name that only begins as the state folder's or the manifest's does, and those names deeper in the path)
+        for path in ["states/widget.bin", "state.bin", "package.yaml.bin", "dist/package.yaml", "dist/state/widget.bin", "Dist/Widget.BIN"] {
+            let p = widget_package_parse(&manifest("com.example.test").replace("path: dist/widget.bin", &format!("path: {path}"))).unwrap();
+            assert_eq!(widget_package_validate(&p, 1860, 2480), Ok(()), "{path}");
+        }
         // (the capability to draw alone is a whole list: a widget that saves nothing)
         let p = widget_package_parse(&manifest("com.example.test").replace(", storage:widget-local]", "]")).unwrap();
         assert_eq!(p.capabilities, ["editor:overlay"]);
@@ -1781,6 +1787,14 @@ spec:
             (good.replace("capabilities: [editor:overlay, storage:widget-local]\n", ""), "`capabilities` must declare `editor:overlay`"),
             (good.replace("path: dist/widget.bin", "path: package.yaml"), "safe relative path"),
             (good.replace("path: dist/widget.bin", "path: state/widget.bin"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: state"), "safe relative path"),
+            // (the manifest and the state folder in any case of their letters: a storage that ignores case finds them)
+            (good.replace("path: dist/widget.bin", "path: state/runtime.bin"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: STATE/runtime.bin"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: State/settings.json"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: Package.yaml"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: PACKAGE.YAML"), "safe relative path"),
+            (good.replace("path: dist/widget.bin", "path: sTaTe"), "safe relative path"),
             (good.replace("path: dist/widget.bin", "path: ../widget.bin"), "safe relative path"),
             (good.replace("path: dist/widget.bin", "path: /dist/widget.bin"), "safe relative path"),
             // (names the storage walk does not take: the module is read through it when a frame loads it)

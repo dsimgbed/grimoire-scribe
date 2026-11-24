@@ -1602,7 +1602,7 @@ HTTPS `.yaml` address; the Widgets popup's **Manage widgets...** row opens the s
 The manifest is `package.yaml`; unknown keys are ignored. An install is refused before anything is
 written if the manifest is invalid, the platform does not match, or the artifact does not match its
 size and SHA-256. The artifact is one file under the package's folder; it cannot be `package.yaml`
-or anything under `state/`, which belongs to the host and the widget's saved data.
+or anything under `state/` (in any case of their letters), which belongs to the host and the widget's saved data.
 
 ```yaml
 name: Timer
