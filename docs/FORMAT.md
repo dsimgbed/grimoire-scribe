@@ -1584,7 +1584,7 @@ is the widget's id, an `=`, and seven comma-separated numbers: x, y, width, heig
 or 1), z-order, and a reserved flag (written as 0). Coordinates are screen pixels, as the panel's
 are. A closed widget has no line. An id here is read by the rule a manifest's `id` is checked by
 (lowercase letters, digits, dots and hyphens, at most 128 bytes, no dot first or last and no two in
-a row), so the frame of any package that installs is found again. Unknown ids and malformed lines
+a row, and not ending in `.previous`), so the frame of any package that installs is found again. Unknown ids and malformed lines
 are skipped. The z-order only orders the frames (a greater number is drawn over a smaller): any
 number an `i32` holds is read, and the frames are numbered again from 0, in their order, when the
 next number would pass the largest. The file is at most 64 KiB, written atomically.
@@ -1608,7 +1608,7 @@ or anything under `state/` (in any case of their letters), which belongs to the 
 
 ```yaml
 name: Timer
-id: com.example.timer          # lowercase letters, digits, dots and hyphens, at most 128 bytes
+id: com.example.timer          # lowercase letters, digits, dots and hyphens, at most 128 bytes; not ending in .previous
 version: 1.0.0                 # semantic version (a -prerelease suffix is allowed)
 type: widget
 author: Jane Doe
@@ -1687,7 +1687,8 @@ answer does.
 `source_url`, one after another, and installs the newer ones; an up-to-date package costs its
 manifest's fetch only. The packages were trusted when they were installed, so the batch does not
 ask again for each one. An update keeps the old directory as `<id>.previous` until the new one is in
-place, so a failed write can be rolled back. Removing a package closes its widget, deletes its files and its
+place, so a failed write can be rolled back; an id that ends in `.previous` is refused wherever an id is
+read (the manifest check, `packages/index.json`, `widgets.ini`), so that directory is no package's own. Removing a package closes its widget, deletes its files and its
 `widgets.ini` line. A package's own state is kept under `packages/widgets/<id>/state/` when the
 package is replaced or removed (Remove keeps that folder; nothing else of the package stays). The
 host's `settings.json` in that folder is kept too; a package should use another file for its own data.

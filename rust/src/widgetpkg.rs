@@ -673,10 +673,14 @@ pub fn widget_package_parse(text: &str) -> Result<WidgetPackage, String> {
 /// The longest id a package may have, in bytes (docs/WIDGETS.md).
 pub const WIDGET_ID_MAX: usize = 128;
 
+/// What an update adds to a package's id to name the folder it keeps the replaced version in
+/// (`packages/widgets/<id>.previous`). No id ends in it, so that folder is never another package's.
+pub const WIDGET_ID_PREVIOUS: &str = ".previous";
+
 /// Whether `id` is a package's id: lowercase letters, digits, dots and hyphens, at most WIDGET_ID_MAX, no dot
-/// first or last and no two in a row. The one rule for an id wherever one is read: a manifest, the packages
-/// index, a package's folder, and a frame's line in widgets.ini (widgets.rs), so a package that installs is one
-/// whose open frame is found again.
+/// first or last and no two in a row, and not ending in `.previous` (WIDGET_ID_PREVIOUS). The one rule for an
+/// id wherever one is read: a manifest, the packages index, a package's folder, and a frame's line in
+/// widgets.ini (widgets.rs), so a package that installs is one whose open frame is found again.
 pub fn widget_id_ok(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= WIDGET_ID_MAX
@@ -684,6 +688,7 @@ pub fn widget_id_ok(id: &str) -> bool {
         && id.as_bytes()[0] != b'.'
         && id.as_bytes()[id.len() - 1] != b'.'
         && !id.contains("..")
+        && !id.ends_with(WIDGET_ID_PREVIOUS)
 }
 
 fn semver_ok(v: &str) -> bool {
@@ -748,6 +753,9 @@ fn cap_ok(c: &str) -> bool {
 pub fn widget_package_validate(p: &WidgetPackage, canvas_w: i32, canvas_h: i32) -> Result<(), String> {
     if p.type_ != "widget" {
         return Err("This repository is not a widget package".into());
+    }
+    if p.id.ends_with(WIDGET_ID_PREVIOUS) {
+        return Err("`id` cannot end in `.previous`; an update keeps the replaced version's folder under that name".into());
     }
     if !widget_id_ok(&p.id) {
         return Err("`id` must be lowercase letters, digits, dots and hyphens".into());
@@ -1114,7 +1122,7 @@ pub fn widget_package_install(manifest: &str, artifact: &[u8], source_url: &str,
         let _ = std::fs::remove_dir_all(&stage);
         return Err("Could not write the artifact.".into());
     }
-    let old = format!("{dir}.previous");
+    let old = format!("{dir}{WIDGET_ID_PREVIOUS}");
     let _ = std::fs::remove_dir_all(&old);
     if std::fs::metadata(&dir).is_ok() && std::fs::rename(&dir, &old).is_err() {
         let _ = std::fs::remove_dir_all(&stage);
@@ -1200,7 +1208,7 @@ pub fn widget_package_rollback(id: &str) -> Result<(), String> {
         return Err("That id is not a widget package's.".into());
     }
     let dir = widget_package_dir(id);
-    let old = format!("{dir}.previous");
+    let old = format!("{dir}{WIDGET_ID_PREVIOUS}");
     if std::fs::metadata(&old).is_err() {
         return Err("There is no previous version to roll back to.".into());
     }
@@ -1778,6 +1786,9 @@ spec:
         for (bad, want) in [
             (good.replace("type: widget", "type: plugin"), "not a widget"),
             (good.replace("com.example.test", "Bad Id"), "lowercase"),
+            // (the name an update gives the replaced version's folder is no package's)
+            (good.replace("com.example.test", "com.example.test.previous"), "`id` cannot end in `.previous`"),
+            (good.replace("com.example.test", "a.previous"), "`id` cannot end in `.previous`"),
             (good.replace("platforms: [all]", "platforms: [kindle-oasis]"), "Unknown platform"),
             (good.replace("capabilities: [editor:overlay, storage:widget-local]", "capabilities: [net]"), "Unknown capability"),
             (good.replace("capabilities: [editor:overlay, storage:widget-local]", "capabilities: [editor:overlay, net]"), "Unknown capability"),
@@ -1930,6 +1941,54 @@ spec:
         }
         assert_eq!(widget_github_repo_url("jane/widgets").as_deref(), Some("https://github.com/jane/widgets"));
         assert!(widget_github_repo_url("https://example.org/widgets").is_none());
+    }
+
+    #[test]
+    fn no_id_ends_as_the_folder_of_a_replaced_version_does() {
+        ui_init(300.0);
+        assert_eq!(WIDGET_ID_PREVIOUS, ".previous");
+        for (id, ok) in [
+            ("com.example.test", true),
+            ("com.example.test.previous", false),
+            ("a.previous", false),
+            ("x-1.previous", false),
+            // (only the end of an id: these name no replaced version's folder)
+            ("previous", true),
+            ("com.example.previous.test", true),
+            ("com.example.previousx", true),
+            ("com.example.test-previous", true),
+            ("com.example.test.previous.previous", false),
+        ] {
+            assert_eq!(widget_id_ok(id), ok, "{id}");
+        }
+        let root = std::env::temp_dir().join(format!("grimoire-widgetpkg-previous-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(store_init(root.to_str().unwrap()), 0);
+        // A package, and one whose id is that id with `.previous` after it: the second is not installed.
+        let it = widget_package_install(&manifest("com.example.test"), b"test", "", 1860, 2480).unwrap();
+        let e = widget_package_install(&manifest("com.example.test.previous"), b"test", "", 1860, 2480).unwrap_err();
+        assert!(e.contains("`id` cannot end in `.previous`"), "{e}");
+        assert!(!root.join("packages/widgets/com.example.test.previous").exists());
+        // An update of the first keeps the replaced version in that folder, which is nobody else's; the index and
+        // widgets.ini read no such id, whoever wrote it there.
+        let state = format!("{}/state", widget_package_dir(&it.id));
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(format!("{state}/session"), b"keep").unwrap();
+        widget_package_install(&manifest("com.example.test").replace("version: 1.2.0", "version: 1.3.0"), b"test", "", 1860, 2480).unwrap();
+        let kept = std::fs::read_to_string(root.join("packages/widgets/com.example.test.previous/package.yaml")).unwrap();
+        assert!(kept.contains("version: 1.2.0") && kept.contains("id: com.example.test\n"));
+        assert_eq!(std::fs::read(format!("{state}/session")).unwrap(), b"keep");
+        let index = std::fs::read_to_string(widget_package_index_path()).unwrap();
+        std::fs::write(widget_package_index_path(), index.replace("\"id\":\"com.example.test\"", "\"id\":\"com.example.test.previous\"")).unwrap();
+        assert!(widget_package_index_load().is_empty(), "an index entry with such an id is skipped");
+        assert!(widget_package_remove("com.example.test.previous", false).is_err());
+        assert!(root.join("packages/widgets/com.example.test.previous").exists(), "and removing by that id touches nothing");
+        std::fs::write(root.join("widgets.ini"), "com.example.test.previous=1,2,300,300,0,1,0\ncom.example.test=5,6,300,300,0,2,0\n").unwrap();
+        let lines = crate::widgets::widgets_load();
+        assert_eq!(lines.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["com.example.test"]);
+        widget_catalog_invalidate();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
