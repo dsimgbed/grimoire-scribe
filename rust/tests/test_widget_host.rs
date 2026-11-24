@@ -169,3 +169,70 @@ fn a_hit_region_is_the_part_of_it_inside_the_body() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_package_without_the_storage_capability_has_no_saved_state() {
+    let root = fresh_root("storage");
+    let state_file = |id: &str| root.join(format!("packages/widgets/{id}/state/runtime.bin"));
+    let mut c = patterned(700, 600);
+    // Declared: the first draw finds nothing saved and saves a word, the next finds it, and so does a new load.
+    let mut rt = installed("test.keeps", &BOTH, &keeps());
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.status(), "");
+    assert_eq!(std::fs::read(state_file("test.keeps")).unwrap(), b"hello");
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.status(), "hello");
+    let mut rt = WidgetRuntime::new("test.keeps").unwrap();
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.status(), "hello");
+    // Not declared: state_get gives nothing, state_set keeps nothing, in a draw and in a tap, and no file is made.
+    let mut rt = installed("test.forgets", &["editor:overlay"], &keeps());
+    for _ in 0..3 {
+        rt.draw(&mut c, BODY);
+        assert_eq!(rt.error(), None);
+        assert_eq!(rt.status(), "");
+        assert_eq!(rt.hit_count(), 1);
+        rt.tap(20, 20);
+    }
+    assert!(!state_file("test.forgets").exists());
+    assert!(!state_file("test.forgets").parent().unwrap().exists(), "no state folder is made either");
+    // A state file from a version of the package that declared the capability is not read, and stays as it is.
+    std::fs::create_dir_all(state_file("test.forgets").parent().unwrap()).unwrap();
+    std::fs::write(state_file("test.forgets"), b"kept").unwrap();
+    let mut rt = WidgetRuntime::new("test.forgets").unwrap();
+    rt.draw(&mut c, BODY);
+    rt.tap(20, 20);
+    rt.draw(&mut c, BODY);
+    assert_eq!(rt.status(), "");
+    assert_eq!(std::fs::read(state_file("test.forgets")).unwrap(), b"kept");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_package_without_the_overlay_capability_draws_nothing() {
+    let root = fresh_root("overlay");
+    for (id, capabilities) in [("test.unseen", &["storage:widget-local"][..]), ("test.bare", &[][..])] {
+        let mut rt = installed(id, capabilities, &keeps());
+        let before = patterned(700, 600);
+        let mut c = before.clone();
+        for pass in 0..2 {
+            rt.draw(&mut c, BODY);
+            assert_eq!(rt.error(), None, "{id}");
+            // The host clears the body; the module's button, its label and its hit region are not there.
+            assert_eq!(changed_outside(&before, &c, BODY), 0, "{id}");
+            assert_eq!(inked(&c, BODY), 0, "{id}");
+            assert_eq!(rt.hit_count(), 0, "{id}");
+            assert_eq!(rt.text(), "", "{id}");
+            // (the calls that need no capability, and the storage when it is declared, are as ever)
+            let saved = if pass == 1 && !capabilities.is_empty() { "hello" } else { "" };
+            assert_eq!(rt.status(), saved, "{id}");
+        }
+    }
+    // The same module with the capability draws its button.
+    let mut rt = installed("test.seen", &BOTH, &keeps());
+    let mut c = patterned(700, 600);
+    rt.draw(&mut c, BODY);
+    assert_ne!(inked(&c, BODY), 0);
+    assert_eq!((rt.hit_count(), rt.text().as_str()), (1, "hello"));
+    let _ = std::fs::remove_dir_all(&root);
+}

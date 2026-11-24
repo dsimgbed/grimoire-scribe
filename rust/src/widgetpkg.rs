@@ -713,8 +713,13 @@ fn path_ok(p: &str) -> bool {
         && p.split('/').all(|s| !s.is_empty() && s != "." && s != "..")
 }
 
+/// The capabilities a manifest may declare, and what the host gives a module for each (widgetwasm.rs):
+/// drawing in its frame over the notebook, and its own saved state.
+pub const WIDGET_CAP_OVERLAY: &str = "editor:overlay";
+pub const WIDGET_CAP_STORAGE: &str = "storage:widget-local";
+
 fn cap_ok(c: &str) -> bool {
-    matches!(c, "editor:overlay" | "storage:widget-local")
+    c == WIDGET_CAP_OVERLAY || c == WIDGET_CAP_STORAGE
 }
 
 /// Validates a manifest for this build and this device. `canvas_w` and `canvas_h` are the editor

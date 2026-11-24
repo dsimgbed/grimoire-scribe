@@ -52,4 +52,23 @@ shot 02-wide-new-page
 tap panel widget.0.close
 wait 300
 expect editor.widgets is 0
+# Plain is the same module in a package whose manifest declares no capability. Its frame opens at the same place;
+# nothing the module draws is shown, it has no hit region, and a tap leaves no state for the status line to say.
+tap panel widgets
+wait 300
+tap panel widgets.test.host.plain
+wait 400
+expect editor.widgets is 1 test.host.plain
+expect editor.widget.0.rect is 1276 28 400 300
+expect editor.widget.0.error is
+expect editor.widget.0.hits is 0
+expect display.dark.1290.100.372.214 is 0
+shot 03-plain
+tap 1476 207
+wait 300
+expect editor.widget.0.status is
+expect editor.widget.0.hits is 0
+tap panel widget.0.close
+wait 300
+expect editor.widgets is 0
 quit

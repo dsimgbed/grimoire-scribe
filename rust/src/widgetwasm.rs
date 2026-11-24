@@ -35,8 +35,14 @@
 //!
 //! `style` is 0 (normal), 1 (selected) or 2 (disabled). Strings are UTF-8 in the module's memory.
 //! `setting` and `state_get` return the number of bytes written, at most `out_cap` / `cap`.
+//!
+//! A module is given what its manifest's `capabilities` declare and no more (docs/WIDGETS.md):
+//! `editor:overlay` is the drawing in the frame (`rect`, `text`, `button`, `hit`), and
+//! `storage:widget-local` the saved state (`state_get`, `state_set`, the state file). Without the
+//! capability the call is still there to link against, and does nothing.
 
 use crate::prelude::*;
+use crate::widgetpkg::{WIDGET_CAP_OVERLAY, WIDGET_CAP_STORAGE};
 use std::time::{Duration, Instant};
 use wasmi::{Caller, Config, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
@@ -64,6 +70,10 @@ enum DrawCmd {
 }
 
 struct HostState {
+    /// the manifest declares `editor:overlay`: the drawing calls and hit regions are recorded
+    overlay: bool,
+    /// the manifest declares `storage:widget-local`: the state is read, kept and saved
+    storage: bool,
     commands: Vec<DrawCmd>,
     hits: Vec<(i32, Rect)>,
     state: Vec<u8>,
@@ -108,9 +118,17 @@ impl WidgetRuntime {
         let engine = Engine::new(&config);
         let module = Module::new(&engine, &bytes[..]).map_err(|e| format!("The widget's WebAssembly is invalid: {e}"))?;
         let state_path = format!("{}/{STATE_FILE}", crate::widgetpkg::widget_package_dir(id));
-        let state = read_file_max(&state_path, STATE_MAX).unwrap_or_default();
+        let overlay = m.capabilities.iter().any(|c| c == WIDGET_CAP_OVERLAY);
+        let storage = m.capabilities.iter().any(|c| c == WIDGET_CAP_STORAGE);
+        if !overlay {
+            qlog!("widget %s: its manifest does not declare %s, so nothing it draws is shown", id, WIDGET_CAP_OVERLAY);
+        }
+        // (a state file left by a version that declared the capability is not read, and stays as it is)
+        let state = if storage { read_file_max(&state_path, STATE_MAX).unwrap_or_default() } else { Vec::new() };
         let settings = crate::widgetpkg::widget_settings_load(id, &m.settings);
         let mut store = Store::new(&engine, HostState {
+            overlay,
+            storage,
             commands: Vec::new(),
             hits: Vec::new(),
             state,
@@ -126,20 +144,32 @@ impl WidgetRuntime {
         let _ = store.set_fuel(FUEL_PER_CALL);
         let mut linker = Linker::new(&engine);
         linker.func_wrap(ABI, "rect", |mut caller: Caller<'_, HostState>, x: i32, y: i32, w: i32, h: i32, style: i32| {
-            caller.data_mut().commands.push(DrawCmd::Rect { x, y, w, h, style });
+            let st = caller.data_mut();
+            if st.overlay {
+                st.commands.push(DrawCmd::Rect { x, y, w, h, style });
+            }
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "text", |mut caller: Caller<'_, HostState>, x: i32, y: i32, w: i32, h: i32, ptr: i32, len: i32, px: i32, center: i32| {
+            if !caller.data().overlay {
+                return;
+            }
             let text = String::from_utf8_lossy(&read_mem(&caller, ptr, len)).into_owned();
             caller.data_mut().commands.push(DrawCmd::Text { x, y, w, h, text, px, center: center != 0 });
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "button", |mut caller: Caller<'_, HostState>, id: i32, x: i32, y: i32, w: i32, h: i32, ptr: i32, len: i32, style: i32| {
+            if !caller.data().overlay {
+                return;
+            }
             let text = String::from_utf8_lossy(&read_mem(&caller, ptr, len)).into_owned();
             let st = caller.data_mut();
             st.commands.push(DrawCmd::Button { x, y, w, h, text, style });
             st.hits.push((id, Rect { x, y, w, h }));
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "hit", |mut caller: Caller<'_, HostState>, id: i32, x: i32, y: i32, w: i32, h: i32| {
-            caller.data_mut().hits.push((id, Rect { x, y, w, h }));
+            let st = caller.data_mut();
+            if st.overlay {
+                st.hits.push((id, Rect { x, y, w, h }));
+            }
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "status", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| {
             caller.data_mut().status = String::from_utf8_lossy(&read_mem(&caller, ptr, len)).into_owned();
@@ -154,10 +184,16 @@ impl WidgetRuntime {
             write_mem(&mut caller, out_ptr, out_cap, &value)
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "state_get", |mut caller: Caller<'_, HostState>, ptr: i32, cap: i32| -> i32 {
+            if !caller.data().storage {
+                return 0;
+            }
             let state = caller.data().state.clone();
             write_mem(&mut caller, ptr, cap, &state)
         }).map_err(|e| e.to_string())?;
         linker.func_wrap(ABI, "state_set", |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| {
+            if !caller.data().storage {
+                return;
+            }
             let state = read_mem(&caller, ptr, len);
             let st = caller.data_mut();
             st.state = state.into_iter().take(STATE_MAX).collect();
@@ -278,8 +314,10 @@ impl WidgetRuntime {
         self.store.data().redraw_at.is_some_and(|at| at <= now)
     }
 
+    /// Writes the state file after a call that changed the state. A package without
+    /// `storage:widget-local` has no state to change, and no file is made for it.
     fn save(&mut self) {
-        if !self.store.data().dirty {
+        if !self.store.data().storage || !self.store.data().dirty {
             return;
         }
         let st = self.store.data_mut();

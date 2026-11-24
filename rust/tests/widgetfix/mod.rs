@@ -244,9 +244,25 @@ pub fn wide() -> Vec<u8> {
     module(&draw, &tap_saves_id(), &[])
 }
 
+/// Where `keeps` has its word.
+pub const WORD_AT: i32 = 32;
+
+/// A module that keeps a word: each draw says the saved state in the status line, saves "hello" and draws a
+/// button with that label (region 1).
+pub fn keeps() -> Vec<u8> {
+    let mut draw = status_is_state();
+    draw.extend(call("state_set", &[WORD_AT, 5]));
+    draw.extend(button(1, 10, 10, 200, 80, WORD_AT, 5, 0));
+    module(&draw, &tap_saves_id(), &[(WORD_AT as u32, b"hello")])
+}
+
 /// The packages of tests/fixtures/widgethost, in the order of its index.
 pub fn packages() -> Vec<Package> {
-    vec![package("test.host.wide", "Wide", &BOTH, FIXED_400_300, wide())]
+    vec![
+        package("test.host.wide", "Wide", &BOTH, FIXED_400_300, wide()),
+        // (the same module, in a package that declares no capability)
+        package("test.host.plain", "Plain", &[], FIXED_400_300, wide()),
+    ]
 }
 
 /// tests/fixtures/widgethost: an installed data root's `packages` folder, each file's path and bytes.

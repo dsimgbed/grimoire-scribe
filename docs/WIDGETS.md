@@ -75,7 +75,7 @@ license_url: https://github.com/janedoe/timer/blob/main/LICENSE
 min_grimoire_version: 2.2.0
 platforms: [all]
 repository: https://github.com/janedoe/timer
-capabilities: [storage:widget-local]
+capabilities: [editor:overlay, storage:widget-local]
 settings:
   - key: show_seconds
     label: Show seconds
@@ -117,7 +117,7 @@ spec:
 | `min_grimoire_version` | optional; the same `MAJOR.MINOR.PATCH` form, with an optional `-beta.N` or `-rc.N` suffix. The install is refused on an older Grimoire |
 | `platforms` | optional; `all` (the default when the key is omitted), `kindle-scribe-2022`, `kindle-scribe-2024`, or a list of them. An explicit empty list is refused. `all` matches every device |
 | `repository` | optional; the human-facing project address. A GitHub address also gets **View QR code** in the detail page |
-| `capabilities` | optional; only `editor:overlay` and `storage:widget-local` are accepted. Declare only what the widget needs. The ABI itself has no network, filesystem or process access; a module can reach only the frame, its settings and its own state |
+| `capabilities` | optional; `editor:overlay` (the widget draws in its frame) and `storage:widget-local` (it keeps saved state) are the two there are, and any other value is refused. A module is given only what is declared here: see [Capabilities](#capabilities). The ABI itself has no network, filesystem or process access; a module can reach only the frame, its settings and its own state |
 | `settings` | optional; up to 32 settings the package declares for its own Settings page. Each has a `key`, a `label`, a `type` (`toggle` or `choice`), and a `default`; a choice also has 2 to 16 `choices`. An optional `icon` names one of the icons above |
 | `artifact.path` | required; a safe relative path, at most 240 bytes: no leading `/`, no backslash, no empty, `.` or `..` component, and neither `package.yaml` nor anything under `state/` |
 | `artifact.sha256` | required; 64 hexadecimal characters, over the artifact's bytes |
@@ -150,6 +150,26 @@ a rotation or a window-size change.
 
 `mode: resizable` gives the bottom-right grip and clamps to `min` and `max`; `mode: fixed` omits the
 grip and keeps the frame at `default`.
+
+### Capabilities
+
+A module is given what its manifest's `capabilities` declare, and nothing it does not declare:
+
+| capability | what it gives the module |
+|---|---|
+| `editor:overlay` | drawing in its frame over the notebook: `rect`, `text`, `button` and `hit`. Without it those four calls do nothing, so the frame opens with an empty body and no hit regions |
+| `storage:widget-local` | its own saved state: `state_get`, `state_set` and the file `state/runtime.bin`. Without it `state_get` returns `0`, `state_set` does nothing, and no state file is read or written for the package |
+
+A module may import every function of the ABI whatever it declares; a call it has no capability
+for returns at once. `status`, `request_redraw`, `setting` and `now` need no capability. The
+package's settings are the reader's, changed on its Settings page and kept by the host with or
+without `storage:widget-local`.
+
+A widget that draws and remembers something declares both:
+
+```yaml
+capabilities: [editor:overlay, storage:widget-local]
+```
 
 ### Settings
 
@@ -252,14 +272,14 @@ body, is a tap on no region.
 
 | import | |
 |---|---|
-| `rect` | a rectangle in the frame; `style` is `0` normal, `1` selected or `2` disabled |
+| `rect` | a rectangle in the frame; `style` is `0` normal, `1` selected or `2` disabled. `rect`, `text`, `button` and `hit` need `editor:overlay` |
 | `text` | UTF-8 text at `ptr`, `len` in the module's memory, `px` high (1 to 512: a smaller or larger value is drawn at the nearer end), centered when `center` is nonzero |
 | `button` | a button with its own label; it is also a hit region with `id` |
 | `hit` | a hit region with `id`, without drawing anything |
 | `status` | the text the editor's `editor.widget.N.status` probe reads, for tests and debugging |
 | `request_redraw` | asks for `widget_draw` again after `after_ms` (16 to 86,400,000); a clock calls it once per draw, and a package that never calls it is only drawn when something else repaints |
 | `setting` | copies one saved setting's value into `out_ptr` and returns its byte length, or `0`; `out_cap` caps the copy |
-| `state_get` | copies the saved state into `ptr` and returns its byte length, or `0`; `cap` caps the copy |
+| `state_get` | copies the saved state into `ptr` and returns its byte length, or `0`; `cap` caps the copy. `state_get` and `state_set` need `storage:widget-local` |
 | `state_set` | replaces the saved state with the bytes at `ptr`; at most 64 KiB is kept |
 | `now` | Unix time in seconds, when a widget needs a clock |
 
@@ -414,8 +434,8 @@ the old directory as `<id>.previous` until the new one is in place; a failed wri
 
 ## State
 
-A package that needs to remember something across launches writes it through `state_set`; the host
-keeps the bytes in `packages/widgets/<id>/state/runtime.bin`. That folder is not part of the
+A package that needs to remember something across launches declares `storage:widget-local` and
+writes it through `state_set`; the host keeps the bytes in `packages/widgets/<id>/state/runtime.bin`. That folder is not part of the
 artifact and is never overwritten by an update. Removing the package keeps it, so reinstalling
 restores the widget's data. Nothing else of the package remains after a removal.
 
@@ -448,6 +468,7 @@ what it shows there can still be misleading, so the trust decision remains yours
 - [ ] `artifact.size` and `artifact.sha256` match it (`tools/widget-pack.sh`)
 - [ ] `license` and a license file or `license_url`
 - [ ] `spec.runtime: wasm`, and the module exports `memory`, `widget_draw` and `widget_tap`
+- [ ] `capabilities` declares `editor:overlay` for a widget that draws and `storage:widget-local` for one that saves state
 - [ ] `spec.size` within 120x80 and 70% of the canvas
 - [ ] `platforms` correct, `min_grimoire_version` honest
 - [ ] any `settings` keys, labels, defaults and choices are final; changing a key loses its saved value
