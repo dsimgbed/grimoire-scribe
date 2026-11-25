@@ -66,6 +66,11 @@ path = "src/bin/mkicon.rs"
 name = "mklogo"
 path = "src/bin/mklogo.rs"
 
+[[test]]
+name = "test_zotero_unified"
+path = "tests/test_zotero_unified.rs"
+harness = false
+
 [dependencies]
 libc = "0.2"
 # Installed widgets are WebAssembly modules. wasmi is a pure-Rust interpreter, so it follows the

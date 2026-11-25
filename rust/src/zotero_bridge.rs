@@ -77,9 +77,24 @@ pub const ZOTERO_NOTEBOOK_KEY: &str = "zotero";
 
 // ---- the bridge directory ----
 
-/// The directory both apps use: `GZ_BRIDGE_DIR` when it names one, the on-device default else.
-/// An empty override is the same as an unset one.
+static BRIDGE_DIR_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Thread-safe test override for the bridge directory; `None` restores `GZ_BRIDGE_DIR` / default.
+pub fn bridge_set_dir(dir: Option<&str>) {
+    if let Ok(mut g) = BRIDGE_DIR_OVERRIDE.lock() {
+        *g = dir.map(|s| s.trim_end_matches('/').to_string()).filter(|s| !s.is_empty());
+    }
+    library_index_invalidate_cache();
+}
+
+/// The directory both apps use: test override when set, `GZ_BRIDGE_DIR` when it names one,
+/// the on-device default else. An empty override is the same as an unset one.
 pub fn bridge_dir() -> String {
+    if let Ok(g) = BRIDGE_DIR_OVERRIDE.lock() {
+        if let Some(ref d) = *g {
+            return d.clone();
+        }
+    }
     let from_env = std::env::var_os(BRIDGE_DIR_ENV)
         .map(|v| v.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -102,7 +117,7 @@ pub fn bridge_exists() -> bool {
 }
 pub fn bridge_exists_in(dir: &str) -> bool {
     let d = bridge_dir_in(dir);
-    std::fs::symlink_metadata(&d).is_ok_and(|m| m.is_dir())
+    std::fs::symlink_metadata(&d).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir())
 }
 
 /// A file of the bridge, by its fixed name. No caller-supplied component can traverse out of the
@@ -229,7 +244,7 @@ pub fn bridge_log_invalid(name: &str) {
 
 /// Whether every component of `dir` is a real directory and never a symlink; creates missing
 /// trailing components safely. Matches C++ `checkComponents`.
-fn ensure_dir(dir: &str) -> bool {
+pub(crate) fn ensure_dir(dir: &str) -> bool {
     let d = bridge_dir_in(dir);
     if d.is_empty() || d.len() >= 1000 || d.contains('\0') {
         return false;
@@ -267,7 +282,33 @@ fn ensure_dir(dir: &str) -> bool {
     !cur.is_empty()
 }
 
-static WRITE_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Whether `dir` already exists on disk and every component of `dir` is a real non-symlink directory.
+pub(crate) fn check_dir_existing(dir: &str) -> bool {
+    let d = bridge_dir_in(dir);
+    if d.is_empty() || d.len() >= 1000 || d.contains('\0') {
+        return false;
+    }
+    let mut cur = if d.starts_with('/') { String::from("/") } else { String::new() };
+    for part in d.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return false;
+        }
+        if !cur.is_empty() && !cur.ends_with('/') {
+            cur.push('/');
+        }
+        cur.push_str(part);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(md) if !md.file_type().is_symlink() && md.is_dir() => {}
+            _ => return false,
+        }
+    }
+    !cur.is_empty()
+}
+
+pub(crate) static WRITE_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Write a bridge JSON document atomically: `<path>.tmp.<pid>.<nonce>` with O_EXCL|O_NOFOLLOW,
 /// fsync, rename, best-effort fsync of the parent directory. The target directory is made when
@@ -532,7 +573,7 @@ pub fn pct_decode(s: &str) -> Option<String> {
 
 // ---- JSON readers shared by the documents ----
 
-fn parse_json(text: &[u8]) -> Option<(Vec<JsonTok>, i32)> {
+pub(crate) fn parse_json(text: &[u8]) -> Option<(Vec<JsonTok>, i32)> {
     if text.is_empty() || text.len() > (i32::MAX / 2) as usize {
         return None;
     }
@@ -553,14 +594,14 @@ fn parse_json(text: &[u8]) -> Option<(Vec<JsonTok>, i32)> {
     }
 }
 
-fn jtok<'a>(text: &[u8], toks: &'a [JsonTok], obj: i32, key: &str) -> Option<(i32, &'a JsonTok)> {
+pub(crate) fn jtok<'a>(text: &[u8], toks: &'a [JsonTok], obj: i32, key: &str) -> Option<(i32, &'a JsonTok)> {
     let t = json_get(text, toks, obj, key);
     if t < 0 {
         return None;
     }
     Some((t, &toks[t as usize]))
 }
-fn jstr(text: &[u8], toks: &[JsonTok], obj: i32, key: &str, cap: usize) -> Option<String> {
+pub(crate) fn jstr(text: &[u8], toks: &[JsonTok], obj: i32, key: &str, cap: usize) -> Option<String> {
     let (_, tok) = jtok(text, toks, obj, key)?;
     let mut out = Vec::new();
     if !json_string(text, tok, &mut out, cap) {
@@ -568,14 +609,57 @@ fn jstr(text: &[u8], toks: &[JsonTok], obj: i32, key: &str, cap: usize) -> Optio
     }
     Some(String::from_utf8_lossy(&out).into_owned())
 }
-fn jint(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<i32> {
+/// Check whether a raw JSON string token contains an unescaped `\u0000` escape (which `json_string`
+/// otherwise truncates at).
+pub(crate) fn tok_has_escaped_nul(text: &[u8], tok: &JsonTok) -> bool {
+    if tok.type_ != JsonType::String || tok.start < 0 || tok.end < tok.start {
+        return false;
+    }
+    let s = &text[tok.start as usize..tok.end as usize];
+    let mut i = 0;
+    while i < s.len() {
+        if s[i] == b'\\' {
+            if i + 5 < s.len() && s[i + 1] == b'u' && &s[i + 2..i + 6] == b"0000" {
+                return true;
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+/// Strict UTF-8 string field: rejects NUL (`\u0000` included), invalid UTF-8, and decoded length `> max`.
+pub(crate) fn jstr_strict(text: &[u8], toks: &[JsonTok], obj: i32, key: &str, max: usize) -> Option<String> {
+    let (_, tok) = jtok(text, toks, obj, key)?;
+    if tok_has_escaped_nul(text, tok) {
+        return None;
+    }
+    let mut out = Vec::new();
+    if !json_string(text, tok, &mut out, max.saturating_add(6)) {
+        return None;
+    }
+    if out.len() > max || out.contains(&0) {
+        return None;
+    }
+    String::from_utf8(out).ok()
+}
+/// Strict local filesystem path field: UTF-8 `<= max` bytes, rejects NUL, `\r`, `\n`, and ASCII control bytes.
+pub(crate) fn jclean_path(text: &[u8], toks: &[JsonTok], obj: i32, key: &str, max: usize) -> Option<String> {
+    let s = jstr_strict(text, toks, obj, key, max)?;
+    if s.bytes().any(|b| b == 0 || b == b'\r' || b == b'\n' || b < 0x20 || b == 0x7f) {
+        return None;
+    }
+    Some(s)
+}
+pub(crate) fn jint(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<i32> {
     let (_, tok) = jtok(text, toks, obj, key)?;
     let mut v = 0;
     json_int(text, tok, &mut v).then_some(v)
 }
 /// Parse an optional unsigned 32-bit integer field (`0..=u32::MAX`).
 /// Missing or `null` yields `Some(0)`; negative, non-integer, or overflowing values yield `None`.
-fn ju32_opt(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<u32> {
+pub(crate) fn ju32_opt(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<u32> {
     let Some((_, tok)) = jtok(text, toks, obj, key) else { return Some(0) };
     if tok.type_ == JsonType::Null {
         return Some(0);
@@ -589,7 +673,23 @@ fn ju32_opt(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<u32> {
     }
     s.parse::<u32>().ok()
 }
-fn jint64(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<i64> {
+/// Parse an optional non-negative 64-bit integer field (`0..=i64::MAX`) from an integer JSON number.
+/// Missing or `null` yields `Some(0)`; negative, floating-point, non-number, or overflowing values yield `None`.
+pub(crate) fn ji64_nonneg_opt(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<i64> {
+    let Some((_, tok)) = jtok(text, toks, obj, key) else { return Some(0) };
+    if tok.type_ == JsonType::Null {
+        return Some(0);
+    }
+    if tok.type_ != JsonType::Number {
+        return None;
+    }
+    let s = std::str::from_utf8(&text[tok.start as usize..tok.end as usize]).ok()?;
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse::<i64>().ok()
+}
+pub(crate) fn jint64(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<i64> {
     let (_, tok) = jtok(text, toks, obj, key)?;
     if tok.type_ != JsonType::Number {
         return None;
@@ -598,12 +698,12 @@ fn jint64(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<i64> {
     let whole = s.split(['.', 'e', 'E']).next().unwrap_or(s);
     whole.parse::<i64>().ok()
 }
-fn jbool(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<bool> {
+pub(crate) fn jbool(text: &[u8], toks: &[JsonTok], obj: i32, key: &str) -> Option<bool> {
     let (_, tok) = jtok(text, toks, obj, key)?;
     let mut v = false;
     json_bool(tok, &mut v).then_some(v)
 }
-fn jstrings(text: &[u8], toks: &[JsonTok], obj: i32, key: &str, max_items: usize, cap: usize) -> Vec<String> {
+pub(crate) fn jstrings(text: &[u8], toks: &[JsonTok], obj: i32, key: &str, max_items: usize, cap: usize) -> Vec<String> {
     let Some((t, tok)) = jtok(text, toks, obj, key) else { return Vec::new() };
     if tok.type_ != JsonType::Array {
         return Vec::new();
@@ -622,7 +722,7 @@ fn jstrings(text: &[u8], toks: &[JsonTok], obj: i32, key: &str, max_items: usize
     }
     out
 }
-fn schema_ok(text: &[u8], toks: &[JsonTok], obj: i32) -> bool {
+pub(crate) fn schema_ok(text: &[u8], toks: &[JsonTok], obj: i32) -> bool {
     jint(text, toks, obj, "schema_version") == Some(SCHEMA_VERSION)
 }
 
@@ -1056,8 +1156,16 @@ pub fn return_context_load_in(dir: &str) -> Option<ZoteroReturnContext> {
 
 // ---- library_index.json ----
 
-/// One compact catalog item. The bounded strings are the contract's; the two small arrays hold the
-/// collection and tag names a search matches on.
+/// One Zotero collection entry from `zk-sync export-index` (`docs/unified-ink-sync-contract.md` §3.1).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ZoteroCollection {
+    pub key: String,
+    pub name: String,
+    pub parent_key: String,
+}
+
+/// One compact catalog item. The bounded strings are the contract's; the small arrays hold the
+/// collection keys/names and tag names a search or filter matches on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ZoteroLibraryItem {
     pub item_key: String,
@@ -1068,10 +1176,14 @@ pub struct ZoteroLibraryItem {
     pub year: String,
     pub item_type: String,
     pub collections: Vec<String>,
+    pub collection_keys: Vec<String>,
     pub tags: Vec<String>,
     pub has_pdf: bool,
     pub has_epub: bool,
     pub has_snapshot: bool,
+    pub pdf_cached: bool,
+    pub pdf_local_path: String,
+    pub last_opened: i64,
 }
 pub type LibraryItem = ZoteroLibraryItem;
 
@@ -1080,9 +1192,34 @@ pub struct ZoteroLibraryIndex {
     pub schema_version: i32,
     pub exported_at: i64,
     pub item_count: usize,
+    pub collections: Vec<ZoteroCollection>,
     pub items: Vec<ZoteroLibraryItem>,
 }
 pub type LibraryIndex = ZoteroLibraryIndex;
+
+fn jcollection_keys(text: &[u8], toks: &[JsonTok], obj: i32, key: &str, max_items: usize) -> Vec<String> {
+    let Some((t, tok)) = jtok(text, toks, obj, key) else { return Vec::new() };
+    if tok.type_ != JsonType::Array {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for i in 0..tok.size.min(max_items as i32) {
+        let at = json_item(toks, t, i);
+        let Some(item) = toks.get(at.max(0) as usize).filter(|_| at >= 0) else { continue };
+        if tok_has_escaped_nul(text, item) {
+            continue;
+        }
+        let mut b = Vec::new();
+        if json_string(text, item, &mut b, 38) && b.len() <= 32 {
+            if let Ok(s) = String::from_utf8(b) {
+                if item_key_valid(&s) {
+                    out.push(s);
+                }
+            }
+        }
+    }
+    out
+}
 
 pub fn library_index_parse(bytes: &[u8]) -> Option<ZoteroLibraryIndex> {
     let (toks, _) = parse_json(bytes)?;
@@ -1094,7 +1231,43 @@ pub fn library_index_parse(bytes: &[u8]) -> Option<ZoteroLibraryIndex> {
         return None;
     }
     let item_count = ju32_opt(bytes, &toks, 0, "item_count")? as usize;
-    let mut out = ZoteroLibraryIndex { schema_version: SCHEMA_VERSION, exported_at, item_count, items: Vec::new() };
+    let mut out = ZoteroLibraryIndex {
+        schema_version: SCHEMA_VERSION,
+        exported_at,
+        item_count,
+        collections: Vec::new(),
+        items: Vec::new(),
+    };
+    if let Some((carr, ctok)) = jtok(bytes, &toks, 0, "collections") {
+        if ctok.type_ != JsonType::Null {
+            if ctok.type_ != JsonType::Array {
+                return None;
+            }
+            for i in 0..ctok.size.min(10_000) {
+                let ct = json_item(&toks, carr, i);
+                if ct < 0 {
+                    break;
+                }
+                if toks[ct as usize].type_ != JsonType::Object || out.collections.try_reserve(1).is_err() {
+                    continue;
+                }
+                let Some(ckey) = jstr_strict(bytes, &toks, ct, "key", 32) else { continue };
+                if !item_key_valid(&ckey) {
+                    continue;
+                }
+                let parent_key = match jtok(bytes, &toks, ct, "parent_key") {
+                    None => String::new(),
+                    Some((_, pt)) if pt.type_ == JsonType::Null => String::new(),
+                    Some(_) => match jstr_strict(bytes, &toks, ct, "parent_key", 32) {
+                        Some(pk) if pk.is_empty() || item_key_valid(&pk) => pk,
+                        _ => continue,
+                    },
+                };
+                let name = clean_text(&jstr(bytes, &toks, ct, "name", 520).unwrap_or_default(), 256);
+                out.collections.push(ZoteroCollection { key: ckey, name, parent_key });
+            }
+        }
+    }
     let Some((arr, atok)) = jtok(bytes, &toks, 0, "items") else { return Some(out) };
     if atok.type_ != JsonType::Array {
         return None;
@@ -1107,23 +1280,49 @@ pub fn library_index_parse(bytes: &[u8]) -> Option<ZoteroLibraryIndex> {
         if toks[it as usize].type_ != JsonType::Object || out.items.try_reserve(1).is_err() {
             continue;
         }
+        let item_key = jstr_strict(bytes, &toks, it, "item_key", 32).unwrap_or_default();
+        let attachment_key = match jtok(bytes, &toks, it, "attachment_key") {
+            None => String::new(),
+            Some((_, pt)) if pt.type_ == JsonType::Null => String::new(),
+            Some(_) => match jstr_strict(bytes, &toks, it, "attachment_key", 32) {
+                Some(ak) => ak,
+                None => continue,
+            },
+        };
+        if !item_key_valid(&item_key) || (!attachment_key.is_empty() && !attachment_key_valid(&attachment_key)) {
+            continue;
+        }
+        let mut pdf_cached = jbool(bytes, &toks, it, "pdf_cached").unwrap_or(false);
+        let pdf_local_path = match jtok(bytes, &toks, it, "pdf_local_path") {
+            None => String::new(),
+            Some((_, pt)) if pt.type_ == JsonType::Null => String::new(),
+            Some(_) => match jclean_path(bytes, &toks, it, "pdf_local_path", 1024) {
+                Some(p) => p,
+                None => {
+                    pdf_cached = false;
+                    String::new()
+                }
+            },
+        };
+        let last_opened = ji64_nonneg_opt(bytes, &toks, it, "last_opened").unwrap_or(0);
         let item = ZoteroLibraryItem {
-            item_key: jstr(bytes, &toks, it, "item_key", 33).unwrap_or_default(),
-            attachment_key: jstr(bytes, &toks, it, "attachment_key", 33).unwrap_or_default(),
+            item_key,
+            attachment_key,
             citation_key: clean_text(&jstr(bytes, &toks, it, "citation_key", 257).unwrap_or_default(), 256),
             title: clean_text(&jstr(bytes, &toks, it, "title", 513).unwrap_or_default(), 512),
             authors: clean_text(&jstr(bytes, &toks, it, "authors", 257).unwrap_or_default(), 256),
             year: clean_text(&jstr(bytes, &toks, it, "year", 257).unwrap_or_default(), 256),
             item_type: clean_text(&jstr(bytes, &toks, it, "item_type", 257).unwrap_or_default(), 256),
             collections: jstrings(bytes, &toks, it, "collections", 64, 257),
+            collection_keys: jcollection_keys(bytes, &toks, it, "collection_keys", 64),
             tags: jstrings(bytes, &toks, it, "tags", 64, 257),
             has_pdf: jbool(bytes, &toks, it, "has_pdf").unwrap_or(false),
             has_epub: jbool(bytes, &toks, it, "has_epub").unwrap_or(false),
             has_snapshot: jbool(bytes, &toks, it, "has_snapshot").unwrap_or(false),
+            pdf_cached,
+            pdf_local_path,
+            last_opened,
         };
-        if !item_key_valid(&item.item_key) || (!item.attachment_key.is_empty() && !attachment_key_valid(&item.attachment_key)) {
-            continue;
-        }
         out.items.push(item);
         if out.items.len() > 100_000 {
             break;
@@ -1131,8 +1330,79 @@ pub fn library_index_parse(bytes: &[u8]) -> Option<ZoteroLibraryIndex> {
     }
     Some(out)
 }
-pub fn library_index_load() -> Option<ZoteroLibraryIndex> {
-    library_index_load_in(&bridge_dir())
+
+struct CachedLibraryIndex {
+    path: String,
+    ino: u64,
+    len: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    index: std::sync::Arc<ZoteroLibraryIndex>,
+}
+
+static INDEX_CACHE: std::sync::Mutex<Option<CachedLibraryIndex>> = std::sync::Mutex::new(None);
+static INDEX_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Monotonic generation counter for the in-memory `library_index.json` cache.
+pub fn zotero_index_generation() -> u64 {
+    INDEX_GENERATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Clears the in-memory `INDEX_CACHE` and bumps `zotero_index_generation()`.
+pub fn library_index_invalidate_cache() {
+    if let Ok(mut g) = INDEX_CACHE.lock() {
+        *g = None;
+    }
+    INDEX_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+/// Invalidates `INDEX_CACHE` and reloads `library_index.json` from the active bridge directory.
+pub fn library_index_reload() -> Option<std::sync::Arc<ZoteroLibraryIndex>> {
+    library_index_invalidate_cache();
+    library_index_load()
+}
+
+pub fn library_index_load() -> Option<std::sync::Arc<ZoteroLibraryIndex>> {
+    let dir = bridge_dir();
+    let path = bridge_path_in(&dir, LIBRARY_INDEX_FILE)?;
+    let md = match std::fs::symlink_metadata(&path) {
+        Ok(m) if !m.file_type().is_symlink() && m.is_file() => m,
+        _ => {
+            if let Ok(mut g) = INDEX_CACHE.lock() {
+                if g.is_some() {
+                    *g = None;
+                    INDEX_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                }
+            }
+            return None;
+        }
+    };
+    if let Ok(g) = INDEX_CACHE.lock() {
+        if let Some(ref c) = *g {
+            if c.path == path
+                && c.ino == md.ino()
+                && c.len == md.len()
+                && c.mtime == md.mtime()
+                && c.mtime_nsec == md.mtime_nsec()
+            {
+                return Some(std::sync::Arc::clone(&c.index));
+            }
+        }
+    }
+    let parsed = library_index_load_in(&dir)?;
+    let arc = std::sync::Arc::new(parsed);
+    if let Ok(mut g) = INDEX_CACHE.lock() {
+        *g = Some(CachedLibraryIndex {
+            path,
+            ino: md.ino(),
+            len: md.len(),
+            mtime: md.mtime(),
+            mtime_nsec: md.mtime_nsec(),
+            index: std::sync::Arc::clone(&arc),
+        });
+    }
+    INDEX_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    Some(arc)
 }
 pub fn library_index_load_in(dir: &str) -> Option<ZoteroLibraryIndex> {
     let path = bridge_path_in(dir, LIBRARY_INDEX_FILE)?;
@@ -1147,7 +1417,7 @@ pub fn library_index_find<'a>(index: &'a ZoteroLibraryIndex, item_key: &str) -> 
     index.items.iter().find(|i| i.item_key == item_key)
 }
 fn item_matches(item: &ZoteroLibraryItem, needle: &str) -> bool {
-    let has = |s: &str| s.to_ascii_lowercase().contains(needle);
+    let has = |s: &str| s.to_lowercase().contains(needle);
     has(&item.item_key)
         || has(&item.citation_key)
         || has(&item.title)
@@ -1157,9 +1427,37 @@ fn item_matches(item: &ZoteroLibraryItem, needle: &str) -> bool {
         || item.collections.iter().any(|s| has(s))
         || item.tags.iter().any(|s| has(s))
 }
+/// Filter catalog items by optional collection (matching exact `collection_keys` or case-insensitive
+/// `collections` name) and case-insensitive whitespace-separated query terms across `title`, `authors`,
+/// `year`, `citation_key`, `item_key`, `collections`, and `tags`.
+pub fn library_index_filter<'a>(
+    idx: &'a ZoteroLibraryIndex,
+    query: &str,
+    collection: &str,
+) -> Vec<&'a ZoteroLibraryItem> {
+    let coll = collection.trim();
+    let coll_lower = coll.to_lowercase();
+    let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
+    idx.items
+        .iter()
+        .filter(|item| {
+            if !coll.is_empty() {
+                let by_key = item.collection_keys.iter().any(|k| k == coll);
+                let by_name = item
+                    .collections
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(coll) || c.to_lowercase() == coll_lower);
+                if !by_key && !by_name {
+                    return false;
+                }
+            }
+            terms.iter().all(|term| item_matches(item, term))
+        })
+        .collect()
+}
 /// Indices of the items matching a case-insensitive query across all the catalog's text fields.
 pub fn library_index_search_indices(index: &ZoteroLibraryIndex, query: &str) -> Vec<usize> {
-    let needle = query.trim().to_ascii_lowercase();
+    let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return (0..index.items.len()).collect();
     }
