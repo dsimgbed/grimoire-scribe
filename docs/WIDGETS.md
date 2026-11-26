@@ -109,10 +109,10 @@ spec:
 
 | field | |
 |---|---|
-| `name` | required; the row and the frame's title. At most 1,023 bytes, as `author` and `description` are: what the index of installed packages keeps of each |
+| `name` | required; the row and the frame's title. At most 1,023 bytes, as `version`, `author` and `description` are: what the index of installed packages keeps of each |
 | `id` | required; the package's permanent identity. Lowercase letters, digits, dots and hyphens only, at most 128, no leading or trailing dot and no `..`, and not ending in `.previous` (an update keeps the replaced version's folder as `<id>.previous`, so that name is no package's). The install, update and remove paths all use it, and so does the saved layout (`widgets.ini` reads an id by this same rule, whatever its length up to 128), so never change it between versions |
 | `type` | must be `widget` |
-| `version` | required; `MAJOR.MINOR.PATCH`, with an optional prerelease suffix. The updater orders `-beta.N` and `-rc.N`; another suffix is accepted but is not ordered as newer. No leading zeroes in a number. An update is installed only when this sorts above the installed version, so bump it for every published change |
+| `version` | required; `MAJOR.MINOR.PATCH`, with an optional prerelease suffix. The updater orders `-beta.N` and `-rc.N`; another suffix is accepted but is not ordered as newer. No leading zeroes in a number. At most 1,023 bytes. An update is installed only when this sorts above the installed version, so bump it for every published change |
 | `author` | optional; shown in the detail page and the widget's frame metadata. At most 1,023 bytes |
 | `description` | optional; shown in the list, the detail page and the frame. At most 1,023 bytes |
 | `license` | optional; the SPDX name or a short name. When its text is found, the install page asks the reader to agree before installing |
@@ -137,7 +137,8 @@ spec:
 Unknown top-level keys are ignored, so a newer manifest can carry fields an older Grimoire does not
 know; unknown keys inside `spec` are ignored too. Values of the known fields are checked where
 they affect the install: a missing name, a bad id, version, path, digest or size, an unknown
-platform, capability or runtime is refused. An unknown icon falls back to the widget grid.
+platform, capability or runtime is refused. The package page says why: each error it shows is at
+most 256 bytes, cut between characters. An unknown icon falls back to the widget grid.
 
 Limits: the manifest may be at most 256 KiB, the artifact at most 32 MiB, at most 64 packages may
 be installed, and at most 8 widget frames may be open at once. A `wasm` artifact is one file; a
@@ -418,7 +419,8 @@ Each time a frame opens, before the module is loaded, its file is checked again:
 A file that fails a check is not loaded: the frame says "The widget's artifact could not be read."
 in place of its body, and Grimoire's log says which check it was. (A frame whose module failed says
 the reason first, in as many lines as its body holds, and under it, where lines are left, the
-package's name, version and author; a body with room for one line shows the start of the reason.) The file is read and hashed once
+package's name, version and author; a body with room for one line shows the start of the reason. Each
+text a widget's frame shows there is at most 256 bytes, cut between characters.) The file is read and hashed once
 for each load, which is once for a frame that opens; drawing does not read it again.
 
 `tests/fixtures/widgetcalc/` holds a compiled calculator package used by the scenarios;

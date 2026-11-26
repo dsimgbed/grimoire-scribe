@@ -41,6 +41,14 @@ pub fn widget_floor() -> (i32, i32) {
 }
 /// A frame never takes more than this share of the canvas either way.
 const WIDGET_MAX_SHARE: i32 = 70;
+/// The most bytes of a text a widget's frame shows in place of its body (`WidgetFrame::error`, `says`): a longer
+/// text is cut between two characters, as a toast's is.
+pub const WIDGET_FRAME_TEXT_MAX: usize = 256;
+
+/// A text as a widget's frame shows it: at most WIDGET_FRAME_TEXT_MAX bytes, cut between two characters.
+fn frame_text(text: &str) -> &str {
+    cut_at_bytes(text, WIDGET_FRAME_TEXT_MAX)
+}
 
 /// One entry in the widget catalog. Sizes are at 300 dpi, as the rest of the UI's constants.
 #[derive(Clone, Copy, Debug)]
@@ -178,14 +186,16 @@ impl WidgetFrame {
         }
     }
 
-    /// The last runtime error, if its package or module could not start.
+    /// The last runtime error, if its package or module could not start, or its module was stopped: as the frame
+    /// shows it, at most WIDGET_FRAME_TEXT_MAX bytes (`frame_text`).
     pub fn error(&self) -> Option<&str> {
-        self.runtime_error.as_deref().or_else(|| self.runtime.as_ref().and_then(WidgetRuntime::error))
+        self.runtime_error.as_deref().or_else(|| self.runtime.as_ref().and_then(WidgetRuntime::error)).map(frame_text)
     }
 
     /// What a frame whose module failed says in place of its body, in the order it is drawn: the reason (the
     /// frame's error), then whose widget it is (the package's name, its version and its author). None while the
-    /// module runs. The reason is first so that a body with room for little shows it.
+    /// module runs. The reason is first so that a body with room for little shows it. Each is at most
+    /// WIDGET_FRAME_TEXT_MAX bytes (`frame_text`).
     pub fn says(&self) -> Option<(String, String)> {
         let reason = self.error()?.to_string();
         let mut whose = self.def.name.to_string();
@@ -195,7 +205,7 @@ impl WidgetFrame {
         if !self.def.author.is_empty() {
             whose.push_str(&format!(" · {}", self.def.author));
         }
-        Some((reason, whose))
+        Some((reason, frame_text(&whose).to_string()))
     }
 
     /// The frame as drawn and hit: a minimized widget is a small square at its corner.
@@ -725,6 +735,34 @@ mod tests {
         let mut f = WidgetFrame::new(&TEST_WIDGET);
         f.runtime_error = Some("The widget package is not installed.".to_string());
         assert_eq!(f.says(), Some(("The widget package is not installed.".to_string(), "Test".to_string())));
+    }
+
+    #[test]
+    fn a_frame_shows_at_most_256_bytes_of_each_text() {
+        assert_eq!(WIDGET_FRAME_TEXT_MAX, 256);
+        let mut f = WidgetFrame::new(&TEST_WIDGET);
+        // A reason of 256 bytes is shown whole; one byte more, and the first 256 are shown.
+        for (n, shown) in [(255, 255), (256, 256), (257, 256), (100_000, 256)] {
+            f.runtime_error = Some("a".repeat(n));
+            assert_eq!(f.error(), Some("a".repeat(shown).as_str()), "a reason of {n} bytes");
+            assert_eq!(f.says().unwrap().0, "a".repeat(shown), "a reason of {n} bytes");
+        }
+        // Of characters of three bytes, 256 bytes end inside one: the text is cut before it, at 255.
+        f.runtime_error = Some("€".repeat(1000));
+        assert_eq!(f.error(), Some("€".repeat(85).as_str()));
+        // Whose widget it is, the same way: a version of 200,000 bytes, and a name and an author of 1,023 bytes each
+        // (the most a manifest's name and author have).
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        let reason = "The widget's artifact could not be read.".to_string();
+        let versioned: &'static WidgetDef = Box::leak(Box::new(WidgetDef { name: "Test", version: leak(format!("1.0.0-{}", "a".repeat(200_000))), author: "Its Author", ..TEST_WIDGET }));
+        let mut f = WidgetFrame::new(versioned);
+        f.runtime_error = Some(reason.clone());
+        assert_eq!(f.says(), Some((reason.clone(), format!("Test v1.0.0-{}", "a".repeat(256 - 12)))));
+        let name = leak("€".repeat(341));
+        let named: &'static WidgetDef = Box::leak(Box::new(WidgetDef { name, version: "1.0.0", author: name, ..TEST_WIDGET }));
+        let mut f = WidgetFrame::new(named);
+        f.runtime_error = Some(reason.clone());
+        assert_eq!(f.says(), Some((reason, "€".repeat(85))));
     }
 
     #[test]
