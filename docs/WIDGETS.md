@@ -418,7 +418,8 @@ Each time a frame opens, before the module is loaded, its file is checked again:
 A file that fails a check is not loaded: the frame says "The widget's artifact could not be read."
 in place of its body, and Grimoire's log says which check it was. (A frame whose module failed says
 the reason first, in as many lines as its body holds, and under it, where lines are left, the
-package's name, version and author; a body with room for one line shows the start of the reason.) The file is read and hashed once
+package's name, version and author; a body with room for one line shows the start of the reason. Each
+text a widget's frame shows there is at most 256 bytes, cut between characters.) The file is read and hashed once
 for each load, which is once for a frame that opens; drawing does not read it again.
 
 `tests/fixtures/widgetcalc/` holds a compiled calculator package used by the scenarios;
