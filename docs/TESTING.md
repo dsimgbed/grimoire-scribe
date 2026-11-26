@@ -3680,6 +3680,10 @@ day and the deny check refused them. All four are two weeks old on 2026-12-08. B
 ran on the owner's Scribe (firmware 5.20.1.0.2) before the bump, each installed after a backup with the notebooks
 unchanged and KOReader left alone: `b6d78f46` (build `76611b5d45cb`) and `024f5388` (build `c5a8692967d6`, the
 release's code before this commit), both on 2026-11-25; the widget fetcher's and the app host's curl options were
-accepted by that Scribe's curl (8.15.0) the same day. The device checks listed in #100 were not reported before
-this commit. Not yet checked on a Scribe with this release's own build: its What's new, which opens by itself on
-the first start after the update.
+accepted by that Scribe's curl (8.15.0) the same day. This release's bundle (build `4d611cc2edf9`, from `b3f9cc22`,
+its binary byte for byte the one the gate tested) was installed on the owner's Scribe on 2026-11-25, after a
+backup, with the notebooks unchanged and KOReader left alone. The owner was asked to look at What's new on the
+first start, the notebooks and settings after the update, a template preview, a PDF import and Files' Covers view,
+a font of their own being checked, KOReader's Open this book in Grimoire after the plugin's update, and a widget
+from the Package Store. The owner's verdict, 2026-11-25: "this is good." The device checks listed in #100 were not
+reported one by one.
