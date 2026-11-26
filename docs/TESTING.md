@@ -3666,3 +3666,20 @@ They check the headless runner's panel; on the Kindle, check what the screen sho
     notebook, Select, Paste: the line is scaled down to fit the page, and on the screen it looks as it did in the
     notebook it came from, its lines as thick and its gaps as wide (before 2.2 they kept their width in mm and came
     out a little thicker and wider). Undo.
+
+## 2.2.0
+
+The first release of 2.2, from `release/2.2.0`: cut from `main` at `75ec0993` on 2026-11-23, with the work merged
+into it since (#240, #244, #246, #81, #258, #256, #269, #270), everything in CHANGELOG's 2.2.0 section. Automated:
+the full gate on the release commit with the pinned toolchain. On 2026-11-25 the owner chose to release it ("let's
+fix ourselves and ship"); the published Calculator widget, whose manifest declared no capabilities and which 2.2
+refuses at install, was fixed the same day in the Package Store's own repository (Calculator 1.2.1), not in
+Grimoire. The crate-age rule (two weeks at the tag) was waived for this release by the owner on 2026-11-25:
+wasmi, wasmi_collections, wasmi_core and wasmi_ir 2.0.3 (2026-11-24) are younger: 2.0.0 to 2.0.2 were yanked that
+day and the deny check refused them. All four are two weeks old on 2026-12-08. Builds of `release/2.2.0`
+ran on the owner's Scribe (firmware 5.20.1.0.2) before the bump, each installed after a backup with the notebooks
+unchanged and KOReader left alone: `b6d78f46` (build `76611b5d45cb`) and `024f5388` (build `c5a8692967d6`, the
+release's code before this commit), both on 2026-11-25; the widget fetcher's and the app host's curl options were
+accepted by that Scribe's curl (8.15.0) the same day. The device checks listed in #100 were not reported before
+this commit. Not yet checked on a Scribe with this release's own build: its What's new, which opens by itself on
+the first start after the update.

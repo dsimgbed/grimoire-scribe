@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.2.0 (unreleased)
+## 2.2.0 (2026-11-26)
 
 - **A new Settings menu** (#115, nebuff). Settings opens as a menu of six groups, General, Display, Sleep & Clock,
   Pen, Controls and System, each row opening its own sheet.
