@@ -61,6 +61,8 @@ enum Modal {
     /// Settings > System > Darker lines in imported PDFs (2.2, issue #173, Rust only; a number of its own, beside the
     /// eraser's): Off, Medium, Strong, as the eraser's list
     DarkerLines = 385,
+    /// Built-in Zotero Library browser modal (Phase 2 unified reader; Rust only, 300..400 lane block)
+    Zotero = 398,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -238,6 +240,8 @@ const H_DARKER_PICK: i32 = 251;
 const H_DARKER_BACK: i32 = 252;
 // Settings > Packages > Widgets (2.2, issue #200): the widget package manager (widgetpkgui.rs).
 const H_SET_PACKAGES: i32 = 260;
+// Top bar Zotero catalog browser button (Phase 2 unified reader).
+const H_ZOTERO: i32 = 270;
 // Settings > Wi-Fi's top controls and lists: Nearby/Saved (arg: 0 or 1), Rescan, Other... (a hidden
 // network), a saved row's trash (arg: a row), and a network a scan found (arg: an index of
 // WifiSheet.near). The saved rows keep H_WIFI_NET.
@@ -504,6 +508,8 @@ pub struct LibraryState {
     home_pending: bool,
     home_deferred: bool,
     home_held: bool,
+    /// Built-in Zotero Library browser modal state (`Modal::Zotero`).
+    pub zotero: ZoteroView,
 }
 
 /// The C's S (a->lib).
@@ -907,6 +913,12 @@ fn draw_base(a: &mut App) {
             id: H_SHARE,
             show: true,
         },
+        Btn {
+            icon: IconKind::Library,
+            label: "Zotero",
+            id: H_ZOTERO,
+            show: bridge_exists(),
+        },
         // TRANSLATORS: the Library's top bar (see Exit): makes a new folder.
         Btn { icon: IconKind::FolderPlus, label: tr("Folder"), id: H_NEWFOLDER, show: true },
         // TRANSLATORS: the Library's top bar (see Exit): makes a new notebook.
@@ -926,8 +938,14 @@ fn draw_base(a: &mut App) {
         btns[0].label = "KOReader";
     }
     const NBTNS: usize = 6;
-    // A word too long for its button (a translation) widens all five alike, as far as leaves the
+    let shown_btns = btns.iter().take(NBTNS).filter(|b| b.show).count();
+    let btn_gap = if shown_btns >= 6 { ui_px(12.0) } else { ui_px(20.0) };
+    if shown_btns >= 6 {
+        bw = ui_px(154.0);
+    }
+    // A word too long for its button (a translation) widens all buttons alike, as far as leaves the
     // app's name room in the bar (beyond that a word is cut, and the fit check hears of it).
+    let max_bw = if shown_btns >= 6 { ui_px(210.0) } else { ui_px(220.0) };
     for b in btns.iter() {
         let need = ui_button_need_w(
             bh,
@@ -940,13 +958,17 @@ fn draw_base(a: &mut App) {
             },
         );
         if b.show {
-            bw = clampi(need, bw, ui_px(220.0));
+            bw = clampi(need, bw, max_bw);
         }
     }
     let mut rx = aw - m;
+    let mut placed_any = false;
     for b in btns.iter().take(NBTNS) {
         if !b.show {
             continue;
+        }
+        if placed_any {
+            rx -= btn_gap;
         }
         let w = bw;
         rx -= w;
@@ -963,7 +985,10 @@ fn draw_base(a: &mut App) {
             },
         );
         hits_add(&mut s.hits, r, b.id, 0);
-        rx -= ui_px(20.0);
+        placed_any = true;
+    }
+    if placed_any && shown_btns < 6 {
+        rx -= btn_gap;
     }
     if !s.cur_folder.is_empty() {
         ui_icon(
@@ -6215,6 +6240,11 @@ fn draw_modal(a: &mut App) {
                 lib(a).tpl_picker = p;
             }
         }
+        Modal::Zotero => {
+            let mut zv = std::mem::take(&mut lib(a).zotero);
+            zotero_view_draw(&mut zv, a);
+            lib(a).zotero = zv;
+        }
         Modal::None => {}
     }
 }
@@ -6231,12 +6261,17 @@ fn toast_floor(a: &App) -> i32 {
     if s.modal == Modal::Kb {
         return s.kb.area.y;
     }
+    if s.modal == Modal::Zotero && s.zotero.kb.open && !rect_is_empty(s.zotero.kb.area) {
+        return s.zotero.kb.area.y;
+    }
     // (The Custom music and Templates sheets lie over the New notebook sheet: only their own
     // controls count.)
     let l = if s.modal == Modal::Music {
         &s.mb.hits
     } else if s.modal == Modal::Templates {
         &s.ts.hits
+    } else if s.modal == Modal::Zotero {
+        &s.zotero.hits
     } else {
         &s.hits
     };
@@ -6527,6 +6562,9 @@ fn close_modal(a: &mut App) {
         return;
     }
     let was = std::mem::replace(&mut lib(a).modal, Modal::None);
+    if was == Modal::Zotero {
+        zotero_view_close(&mut lib(a).zotero);
+    }
     // (What's new was over the Library at a start whose home is inside Files, 2.2, issue #160: home now)
     if was == Modal::About && std::mem::take(&mut lib(a).home_deferred) {
         home_go(a);
@@ -7011,6 +7049,12 @@ fn act(a: &mut App, h: &Hit) {
         // TRANSLATORS: the keyboard's label for the name being typed: a folder's, or a notebook's.
         H_NEWFOLDER => open_kb(a, KbPurpose::NewFolder, c_("keyboard", "Folder"), b""),
         H_SHARE => share_open(a),
+        H_ZOTERO => {
+            let mut zv = std::mem::take(&mut lib(a).zotero);
+            zotero_view_open(&mut zv, a);
+            lib(a).zotero = zv;
+            open_modal(a, Modal::Zotero);
+        }
         H_SETTINGS => {
             let s = lib(a);
             s.settings_cat_page = 0;
@@ -8310,6 +8354,22 @@ pub fn library_shortcut(a: &mut App, action: i32) -> bool {
         act(a, &Hit { id, ..Default::default() });
         return true;
     }
+    if lib(a).modal == Modal::Zotero
+        && !lib(a).zotero.kb.open
+        && matches!(action, SHORTCUT_PREV_PAGE | SHORTCUT_NEXT_PAGE)
+    {
+        let s = lib(a);
+        if action == SHORTCUT_NEXT_PAGE && (s.zotero.page as usize + 1) < s.zotero.pages {
+            s.zotero.page += 1;
+            zotero_view_refresh(&mut s.zotero);
+            redraw(a, RefreshMode::Ui);
+        } else if action == SHORTCUT_PREV_PAGE && s.zotero.page > 0 {
+            s.zotero.page -= 1;
+            zotero_view_refresh(&mut s.zotero);
+            redraw(a, RefreshMode::Ui);
+        }
+        return true;
+    }
     if lib(a).modal != Modal::None {
         return false;
     }
@@ -8584,6 +8644,17 @@ pub fn library_back(a: &mut App) -> bool {
         }
         Modal::Gestures if reset_asked => tap(a, H_GESTURES_RESET_CANCEL),
         Modal::Gestures => tap(a, H_GESTURES_DONE),
+        Modal::Zotero if lib(a).zotero.kb.open => {
+            if !app_type_text(a, KbInput::Cancel) {
+                let s = lib(a);
+                s.zotero.filter = s.zotero.filter_before_kb.clone();
+                s.zotero.page = 0;
+                keyboard_close(&mut s.zotero.kb);
+                zotero_view_refresh(&mut s.zotero);
+                redraw(a, RefreshMode::Ui);
+            }
+        }
+        Modal::Zotero => close_modal(a),
         Modal::New | Modal::Settings | Modal::More | Modal::FolderMore | Modal::Move | Modal::Delete
         | Modal::About | Modal::Exit | Modal::Merge | Modal::FilesMore => close_modal(a),
     }
@@ -8720,6 +8791,7 @@ pub fn library_free(a: &mut App) {
     canvas_free(&mut s.custom_prev);
     musicbuild_free(&mut s.mb);
     tplsheet_close(&mut s.ts);
+    zotero_view_close(&mut s.zotero);
     canvas_free(&mut s.tpl_prev);
     a.lib = None;
 }
@@ -8741,6 +8813,7 @@ pub fn library_enter(a: &mut App) {
     let s = lib(a);
     let reopen_settings = std::mem::take(&mut s.reopen_settings);
     if !relayout {
+        zotero_view_close(&mut s.zotero);
         s.modal = Modal::None;
         s.settings_return_editor = false;
         s.share_wifi_return = false;
@@ -8816,7 +8889,15 @@ pub fn library_leave(a: &mut App) {
 /// editor's Graph.
 pub fn library_touch_view(a: &App) -> TgView {
     let record = library_record_active(a);
-    let kb = a.lib.as_deref().filter(|s| s.modal == Modal::Kb).map(|s| s.kb.area);
+    let kb = a.lib.as_deref().and_then(|s| {
+        if s.modal == Modal::Kb {
+            Some(s.kb.area)
+        } else if s.modal == Modal::Zotero && s.zotero.kb.open {
+            Some(s.zotero.kb.area)
+        } else {
+            None
+        }
+    });
     let graph = graph_shown(a) && a.lib.as_deref().is_some_and(|s| !s.map_picker.open);
     TgView {
         gestures_on: record || a.settings.gestures,
@@ -8989,6 +9070,39 @@ fn library_event_in(a: &mut App, ev: &InEvent) {
         }
         return;
     }
+    if modal == Modal::Zotero {
+        let mut d = Rect::default();
+        let mut zv = std::mem::take(&mut lib(a).zotero);
+        let r = zotero_view_pointer(&mut zv, a, ph, ev, &mut d);
+        lib(a).zotero = zv;
+        match r {
+            ZvResult::Close => {
+                close_modal(a);
+            }
+            ZvResult::Changed => {
+                redraw(a, RefreshMode::Ui);
+            }
+            ZvResult::Open(item) => {
+                crate::app::zotero_open_item(a, &item, 0, None);
+            }
+            ZvResult::OpenInZotero(item) => {
+                let _ = app_request_zotero_handoff(
+                    a,
+                    &item.item_key,
+                    &item.attachment_key,
+                    0,
+                    "",
+                    None,
+                );
+            }
+            ZvResult::None => {
+                if !rect_is_empty(d) {
+                    app_invalidate(a, d, RefreshMode::Ui);
+                }
+            }
+        }
+        return;
+    }
     if modal == Modal::Kb {
         let mut kb = std::mem::take(&mut lib(a).kb);
         let r = app_keyboard_pointer(a, &mut kb, ph, ev); // (what a key changed, drawn and refreshed)
@@ -9151,6 +9265,14 @@ pub fn library_tick(a: &mut App, now: u32) {
         let mut kb = std::mem::take(&mut lib(a).kb);
         app_keyboard_tick(a, &mut kb, now);
         lib(a).kb = kb;
+    }
+    if lib(a).modal == Modal::Zotero {
+        let mut zv = std::mem::take(&mut lib(a).zotero);
+        let changed = zotero_view_tick(&mut zv, a, now);
+        lib(a).zotero = zv;
+        if changed {
+            redraw(a, RefreshMode::Ui);
+        }
     }
     let mut d = Rect::default();
     if lib(a).modal == Modal::Templates {
@@ -9469,6 +9591,8 @@ pub fn library_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i3
         csnprintf!(out, cap, "about-link");
     } else if key == "sheet" && s.modal == Modal::FilesMore {
         csnprintf!(out, cap, "files-more");
+    } else if key == "sheet" && s.modal == Modal::Zotero {
+        csnprintf!(out, cap, "zotero");
     } else if key == "sheet" {
         match SHEETS.get(s.modal as usize) {
             Some(m) => csnprintf!(out, cap, "%s", *m),
@@ -9586,11 +9710,16 @@ pub fn library_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i3
     } else if let Some(point) = key.strip_prefix("ui_at.") {
         let Some((x, y)) = point.split_once('.') else { return -1; };
         let (Ok(x), Ok(y)) = (x.parse::<i32>(), y.parse::<i32>()) else { return -1; };
+        if s.modal == Modal::Zotero {
+            let name = zotero_view_hit_name(&s.zotero, x, y);
+            csnprintf!(out, cap, "%s", &name);
+            return 0;
+        }
         let hit = hits_find(&s.hits, x as f32, y as f32);
         let mut name = String::new();
         if let Some(hit) = hit {
             name.push_str(match hit.id {
-                H_NEW=>"new",H_NEWFOLDER=>"new-folder",H_SETTINGS=>"settings",H_SHARE=>"share",H_EXIT=>"exit",
+                H_NEW=>"new",H_NEWFOLDER=>"new-folder",H_SETTINGS=>"settings",H_SHARE=>"share",H_ZOTERO=>"zotero",H_EXIT=>"exit",
                 H_MORE_OPEN=>"more.open",H_MORE_RENAME=>"more.rename",H_MORE_PDF=>"more.pdf",H_MORE_DELETE=>"more.delete",
                 H_MORE_GRAPH=>"more.graph",H_FMORE_GRAPH=>"fmore.graph",H_DELETE_YES=>"delete.yes",
                 H_SET_THEME=>"theme",H_NEW_CREATE=>"create",H_MORE_MOVE=>"more.move",
@@ -9738,7 +9867,8 @@ pub fn library_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i3
                 "pairing"
             } else {
                 "idle"
-            },
+            }
+            ,
             s.nfound,
             s.npaired
         );
@@ -9784,13 +9914,21 @@ pub fn library_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i3
             "%s",
             if s.modal == Modal::Kb {
                 s.kb.text.as_str()
+            } else if s.modal == Modal::Zotero && s.zotero.kb.open {
+                s.zotero.kb.text.as_str()
             } else {
                 ""
             }
         );
     } else if key == "caret" {
         // The text with its caret (and selection) drawn in, keyboard_caret_probe; empty with no keyboard.
-        let shown = if s.modal == Modal::Kb { keyboard_caret_probe(&s.kb) } else { String::new() };
+        let shown = if s.modal == Modal::Kb {
+            keyboard_caret_probe(&s.kb)
+        } else if s.modal == Modal::Zotero && s.zotero.kb.open {
+            keyboard_caret_probe(&s.zotero.kb)
+        } else {
+            String::new()
+        };
         csnprintf!(out, cap, "%s", &shown);
     } else if key == "hint" {
         csnprintf!(out, cap, "%d", if empty_hint_shown(s) { 1 } else { 0 });
@@ -9830,6 +9968,10 @@ pub fn library_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i3
             out,
             cap,
         );
+    } else if let Some(rest) = key.strip_prefix("zotero.") {
+        let closed = ZoteroView::default();
+        let view = if s.modal == Modal::Zotero { &s.zotero } else { &closed };
+        return if zotero_view_probe(view, rest, out, cap) { 0 } else { -1 };
     } else if key == "music" {
         // The layout on the Custom music sheet while it is open, else New notebook's custom paper.
         let mut m = MusicLayout::default();
@@ -12310,6 +12452,11 @@ pub fn library_control_point(a:&mut App,name:&str)->Option<(f32,f32)> {
         let s=a.lib.as_deref()?;
         return (s.modal==Modal::Templates && !s.files.open && !s.tpl_picker.open).then(||tplsheet_point(&s.ts,n)).flatten();
     }
+    // Built-in Zotero Library modal controls ("zotero.sync", "zotero.row.1", "zotero.open", ...).
+    if let Some(n)=name.strip_prefix("zotero.") {
+        let s=a.lib.as_deref()?;
+        return (s.modal==Modal::Zotero && !s.files.open).then(||zotero_view_control_point(&s.zotero,n)).flatten();
+    }
     // Its From a notebook... pick (issue #195), named as the editor's pick of a notebook's pages: elsewhere.book.ID,
     // elsewhere.page.N, elsewhere.back, ...
     {
@@ -12384,7 +12531,100 @@ pub fn library_keyboard_area(a: &App) -> Option<Rect> {
         // (Files' rename keyboard, 2.2: Files takes every contact while it is up)
         return s.files.keyboard_area();
     }
+    if s.modal == Modal::Zotero && s.zotero.kb.open && !rect_is_empty(s.zotero.kb.area) {
+        return Some(s.zotero.kb.area);
+    }
     (s.modal == Modal::Kb && s.kb.open && !rect_is_empty(s.kb.area)).then_some(s.kb.area)
+}
+
+/// Whether `Modal::Zotero` is currently open on the Library screen.
+pub fn library_zotero_modal_up(a: &App) -> bool {
+    a.scr == ScreenId::Library && a.lib.as_deref().is_some_and(|s| s.modal == Modal::Zotero && s.zotero.open)
+}
+
+/// Close `Modal::Zotero` cleanly if open (used before opening a Zotero PDF notebook in Editor).
+pub fn library_close_zotero_modal(a: &mut App) {
+    if a.lib.as_deref().is_some_and(|s| s.modal == Modal::Zotero || s.zotero.open) {
+        zotero_view_close(&mut lib(a).zotero);
+        if lib(a).modal == Modal::Zotero {
+            lib(a).modal = Modal::None;
+        }
+        if a.scr == ScreenId::Library && !a.asleep {
+            redraw(a, RefreshMode::Ui);
+        }
+    }
+}
+
+/// Refresh open `ZoteroView` after a background `zk-sync` catalog export or pull finishes.
+pub fn library_zotero_on_refresh(a: &mut App, status: Option<&str>) {
+    let Some(s) = a.lib.as_deref_mut() else { return };
+    if s.modal != Modal::Zotero || !s.zotero.open {
+        return;
+    }
+    match status {
+        Some(msg) => zotero_view_set_status(&mut s.zotero, msg),
+        None => s.zotero.custom_status.clear(),
+    }
+    zotero_view_refresh(&mut s.zotero);
+    if a.scr == ScreenId::Library && !a.asleep {
+        redraw(a, RefreshMode::Ui);
+    }
+}
+
+/// Update the status line of an open `ZoteroView` (scrubbed) and repaint if visible.
+pub fn library_zotero_set_status(a: &mut App, status: &str) {
+    let Some(s) = a.lib.as_deref_mut() else { return };
+    if s.modal != Modal::Zotero || !s.zotero.open {
+        return;
+    }
+    zotero_view_set_status(&mut s.zotero, status);
+    if a.scr == ScreenId::Library && !a.asleep {
+        redraw(a, RefreshMode::Ui);
+    }
+}
+
+/// Programmatic `library_zotero_control` entry point (`"show"`, `"close"`, `"filter"`, `"collection"`,
+/// `"page"`, `"select"`, `"sync"`, `"refresh"`, `"open"`, `"open_zotero"`).
+pub fn library_zotero_control(a: &mut App, key: &str, value: &str) -> bool {
+    if a.scr != ScreenId::Library || a.lib.is_none() {
+        return false;
+    }
+    if key == "show" {
+        act(a, &Hit { id: H_ZOTERO, ..Default::default() });
+        return true;
+    }
+    if lib(a).modal != Modal::Zotero {
+        return false;
+    }
+    let mut zv = std::mem::take(&mut lib(a).zotero);
+    let r = zotero_view_control(&mut zv, a, key, value);
+    lib(a).zotero = zv;
+    match r {
+        ZvResult::Close => {
+            close_modal(a);
+            true
+        }
+        ZvResult::Changed => {
+            redraw(a, RefreshMode::Ui);
+            true
+        }
+        ZvResult::Open(item) => {
+            crate::app::zotero_open_item(a, &item, 0, None);
+            true
+        }
+        ZvResult::OpenInZotero(item) => {
+            let _ = app_request_zotero_handoff(
+                a,
+                &item.item_key,
+                &item.attachment_key,
+                0,
+                "",
+                None,
+            );
+            true
+        }
+        ZvResult::None => false,
+    }
 }
 
 /// The notebook hosts a settings dialog and all its nested sheets without changing screens.

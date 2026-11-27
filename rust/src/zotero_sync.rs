@@ -11,11 +11,13 @@
 //!   writes `zotero_source.json` atomically (`O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`, `fsync`,
 //!   `rename`).
 
+use crate::fsview::StoragePath;
+use crate::pdfimport::name_storable;
 use crate::prelude::*;
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -935,6 +937,7 @@ enum ZkBgState {
 pub struct ZkBgRunner;
 
 static BG_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static BG_LAST_SYNC_REMOTE: AtomicBool = AtomicBool::new(false);
 static BG_STATE: Mutex<Option<ZkBgState>> = Mutex::new(None);
 
 fn finish_bg(id: u64, done: ZkBgDone) {
@@ -959,6 +962,7 @@ pub fn zk_bg_start_refresh(sync_remote: bool) -> bool {
         if matches!(*g, Some(ZkBgState::Running { .. })) {
             return false;
         }
+        BG_LAST_SYNC_REMOTE.store(sync_remote, Ordering::Relaxed);
         *g = Some(ZkBgState::Running { id, status });
     }
     let spawned = std::thread::Builder::new()
@@ -974,6 +978,18 @@ pub fn zk_bg_start_refresh(sync_remote: bool) -> bool {
         return false;
     }
     true
+}
+
+/// Whether the most recently started background refresh requested remote WebDAV/Zotero sync.
+pub fn zk_bg_last_refresh_was_sync() -> bool {
+    BG_LAST_SYNC_REMOTE.load(Ordering::Relaxed)
+}
+
+/// Reset any finished or stale background runner state (used by test harnesses).
+pub fn zk_bg_reset() {
+    if let Ok(mut g) = BG_STATE.lock() {
+        *g = None;
+    }
 }
 
 /// Start a single-flight background `pdf-info` check (or `--fetch` download) for `item`.
@@ -1334,4 +1350,273 @@ pub fn find_notebook_by_attachment_key(attachment_key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether `item` points to an already-cached regular (non-symlink) PDF file on local disk.
+pub fn zotero_pdf_on_disk(item: &ZoteroLibraryItem) -> bool {
+    item.has_pdf
+        && item.pdf_cached
+        && !item.pdf_local_path.is_empty()
+        && std::fs::symlink_metadata(&item.pdf_local_path)
+            .is_ok_and(|md| !md.file_type().is_symlink() && md.is_file())
+}
+
+/// Build a clean, storable Grimoire notebook title for an imported Zotero PDF.
+pub fn zotero_clean_notebook_title(item: &ZoteroLibraryItem, info: &ZkPdfInfo) -> String {
+    let fname_stem = std::path::Path::new(&info.filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let raw = if !item.title.trim().is_empty() {
+        item.title.as_str()
+    } else if !item.citation_key.trim().is_empty() {
+        item.citation_key.as_str()
+    } else if !fname_stem.trim().is_empty() {
+        fname_stem
+    } else {
+        "Zotero PDF"
+    };
+    let mut cleaned = String::with_capacity(raw.len().min(STORE_NAME_LEN));
+    let mut prev_space = true;
+    for ch in raw.chars() {
+        if ch == '\0' || ch.is_control() {
+            if !prev_space {
+                cleaned.push(' ');
+                prev_space = true;
+            }
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !prev_space {
+                cleaned.push(' ');
+                prev_space = true;
+            }
+        } else {
+            cleaned.push(ch);
+            prev_space = false;
+        }
+    }
+    let trimmed = cleaned.trim();
+    let max_bytes = STORE_NAME_LEN.saturating_sub(1).min(120);
+    let mut end = trimmed.len().min(max_bytes);
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    let candidate = trimmed[..end].trim();
+    if candidate.is_empty() || !name_storable(candidate) {
+        "Zotero PDF".to_string()
+    } else {
+        candidate.to_string()
+    }
+}
+
+fn sanitize_staged_pdf_filename(raw: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let stem = if base.len() > 4 && base[base.len() - 4..].eq_ignore_ascii_case(".pdf") {
+        &base[..base.len() - 4]
+    } else {
+        base
+    };
+    let mut out = String::new();
+    for ch in stem.chars() {
+        if out.len() >= 56 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        } else if ch == ' ' && !out.ends_with('_') && !out.is_empty() {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches(|c| c == '.' || c == '_' || c == '-' || c == ' ');
+    let safe_stem = if trimmed.is_empty()
+        || (trimmed.len() >= 4 && trimmed[trimmed.len() - 4..].eq_ignore_ascii_case(".sdr"))
+    {
+        "document"
+    } else {
+        trimmed
+    };
+    format!("{safe_stem}.pdf")
+}
+
+fn path_has_symlink_under(base_dir: &str, full_path: &str) -> bool {
+    let prefix = format!("{}/", base_dir.trim_end_matches('/'));
+    let Some(rel) = full_path.strip_prefix(&prefix) else {
+        return false;
+    };
+    let mut cur = base_dir.trim_end_matches('/').to_string();
+    if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+        return true;
+    }
+    for comp in rel.split('/') {
+        if comp.is_empty() {
+            continue;
+        }
+        cur.push('/');
+        cur.push_str(comp);
+        if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Map `info.local_path` to a `StoragePath` accepted by `pdf_import_queue`:
+/// - Zero-copy when `info.local_path` already resides inside `storage_root()` and passes `FsStorage`'s
+///   non-symlink, zone-safe check.
+/// - Stages a verified regular non-symlink copy into `<store_root>/zotero_cache/<attachment_key>/<safe>.pdf`
+///   when `info.local_path` resides outside `storage_root()` (e.g. `/var/local/zotero-bridge/cache/...`)
+///   or inside a dot-prefixed directory that `FsStorage` does not open directly.
+pub fn zotero_pdf_storage_path(info: &ZkPdfInfo) -> Result<StoragePath, String> {
+    use crate::fsview::{FsErr, FsStorage};
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+
+    if !info.cached || info.local_path.is_empty() {
+        return Err("PDF is not cached locally.".to_string());
+    }
+    if !valid_cli_attachment_key(&info.attachment_key) {
+        return Err("Invalid Zotero attachment key.".to_string());
+    }
+    match std::fs::symlink_metadata(&info.local_path) {
+        Ok(md) if !md.file_type().is_symlink() && md.is_file() => {}
+        _ => return Err("Cached PDF is missing or not a regular file.".to_string()),
+    }
+    if let Some(parent) = std::path::Path::new(&info.local_path).parent() {
+        if std::fs::symlink_metadata(parent).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err("Cached PDF directory is a symlink.".to_string());
+        }
+    }
+
+    let storage_root = crate::pdfimport::storage_root()
+        .ok_or_else(|| "Storage root is unavailable.".to_string())?;
+    let root_trimmed = storage_root.trim_end_matches('/');
+    let root_prefix = format!("{root_trimmed}/");
+
+    if let Some(rel) = info.local_path.strip_prefix(&root_prefix) {
+        if path_has_symlink_under(root_trimmed, &info.local_path) {
+            return Err("Cached PDF path traverses a symlink.".to_string());
+        }
+        if let Some(sp) = StoragePath::new(rel.as_bytes()) {
+            let fs = FsStorage::open(&storage_root, &store_root())
+                .map_err(|_| "Storage root could not be opened.".to_string())?;
+            match fs.open_file(&sp, true) {
+                Ok(_fd) => return Ok(sp),
+                Err(FsErr::Link) => return Err("Cached PDF path traverses a symlink.".to_string()),
+                Err(_) => {}
+            }
+        }
+    }
+
+    // Stage external regular file into zotero_cache/<attachment_key>/<safe_filename>.pdf
+    let c_src = std::ffi::CString::new(info.local_path.as_str())
+        .map_err(|_| "Invalid PDF path.".to_string())?;
+    // SAFETY: c_src is NUL-terminated; O_NOFOLLOW rejects symlinks atomically.
+    let src_raw = unsafe {
+        libc::open(
+            c_src.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if src_raw < 0 {
+        return Err("Cached PDF could not be opened.".to_string());
+    }
+    // SAFETY: src_raw was just opened and is owned exclusively here.
+    let mut src_file = unsafe { std::fs::File::from_raw_fd(src_raw) };
+    let mut src_st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: src_st is written by fstat on valid fd.
+    if unsafe { libc::fstat(src_file.as_raw_fd(), &mut src_st) } != 0
+        || (src_st.st_mode & libc::S_IFMT) != libc::S_IFREG
+    {
+        return Err("Cached PDF is not a regular file.".to_string());
+    }
+    let src_size = src_st.st_size.max(0) as u64;
+    if src_size == 0 || src_size > 512 * 1024 * 1024 {
+        return Err("Cached PDF size is invalid or exceeds 512 MB.".to_string());
+    }
+
+    let (cache_root, rel_prefix) = if let Some(grel) = crate::pdfimport::grimoire_rel() {
+        let base = format!("{}/zotero_cache", store_root().trim_end_matches('/'));
+        (base, format!("{grel}/zotero_cache"))
+    } else {
+        let base = format!("{root_trimmed}/zotero_cache");
+        (base, "zotero_cache".to_string())
+    };
+    if !crate::zotero_bridge::ensure_dir(&cache_root) {
+        return Err("Could not prepare Zotero PDF cache directory.".to_string());
+    }
+    let att_dir = format!("{cache_root}/{}", info.attachment_key);
+    if !crate::zotero_bridge::ensure_dir(&att_dir) {
+        return Err("Could not prepare Zotero attachment cache directory.".to_string());
+    }
+
+    let safe_name = sanitize_staged_pdf_filename(if !info.filename.is_empty() {
+        &info.filename
+    } else {
+        &info.local_path
+    });
+    let dest_path = format!("{att_dir}/{safe_name}");
+    if std::fs::symlink_metadata(&dest_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err("Staged PDF destination is a symlink.".to_string());
+    }
+
+    let reuse = std::fs::symlink_metadata(&dest_path)
+        .ok()
+        .filter(|m| !m.file_type().is_symlink() && m.is_file() && m.len() == src_size)
+        .and_then(|_| {
+            let src_key = crate::md5::partial_md5_fd(src_file.as_raw_fd())?;
+            let dst_f = std::fs::File::open(&dest_path).ok()?;
+            let dst_key = crate::md5::partial_md5_fd(dst_f.as_raw_fd())?;
+            Some(src_key == dst_key)
+        })
+        .unwrap_or(false);
+
+    if !reuse {
+        let tmp_path = format!(
+            "{dest_path}.tmp.{}.{}",
+            std::process::id(),
+            BG_NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let c_tmp = std::ffi::CString::new(tmp_path.as_str())
+            .map_err(|_| "Invalid temporary cache path.".to_string())?;
+        // SAFETY: c_tmp is NUL-terminated; O_CREAT | O_EXCL | O_NOFOLLOW creates a fresh non-symlink file.
+        let tmp_raw = unsafe {
+            libc::open(
+                c_tmp.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if tmp_raw < 0 {
+            return Err("Could not create staged PDF file.".to_string());
+        }
+        // SAFETY: tmp_raw was just opened and is owned exclusively by tmp_file.
+        let mut tmp_file = unsafe { std::fs::File::from_raw_fd(tmp_raw) };
+        let copy_res = (|| -> std::io::Result<()> {
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = src_file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                tmp_file.write_all(&buf[..n])?;
+            }
+            tmp_file.sync_all()?;
+            Ok(())
+        })();
+        drop(tmp_file);
+        if copy_res.is_err() || std::fs::rename(&tmp_path, &dest_path).is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err("Could not stage Zotero PDF into storage.".to_string());
+        }
+    }
+
+    let sp_rel = format!("{rel_prefix}/{}/{safe_name}", info.attachment_key);
+    let sp = StoragePath::new(sp_rel.as_bytes())
+        .ok_or_else(|| "Staged PDF storage path is invalid.".to_string())?;
+    let fs = FsStorage::open(&storage_root, &store_root())
+        .map_err(|_| "Storage root could not be opened.".to_string())?;
+    fs.open_file(&sp, true)
+        .map_err(|_| "Staged PDF could not be verified in storage.".to_string())?;
+    Ok(sp)
 }

@@ -1,7 +1,12 @@
 //! Checkpoint 1 (`docs/unified-ink-sync-contract.md`): enriched `library_index.json` parsing and
 //! collection/query filtering, headless `zk-sync` subprocess wrapper & Zero-Credential scrubbing,
 //! `pdf-info` geometry inspection/fetch, and `zotero_source.json` notebook sidecar + deduplication.
+//!
+//! Phase 2 (`mod phase2`, `--features sim`): the unified reader end to end on a 1860 x 2480 panel at
+//! 300 DPI, with real PDF imports through `grimoire-headless --work` and a mock `zk-sync`.
 
+#[cfg(feature = "sim")]
+mod pdffix;
 mod testlib;
 
 use grimoire::prelude::*;
@@ -23,13 +28,28 @@ fn scratch_root() -> PathBuf {
     root
 }
 
-fn make_notebook(name: &str, pages: u32, modified: i64) -> NotebookInfo {
+/// `store_save_info` stamps `modified` with the wall clock (1 s resolution), so notebooks made in one
+/// second tie. Write the wanted time into `notebook.ini` itself, where `store_list` reads it.
+fn set_modified(store: &str, nb: &mut NotebookInfo, modified: i64) {
+    let path = Path::new(store).join("notebooks").join(nb.id.as_str()).join("notebook.ini");
+    let ini = std::fs::read_to_string(&path).unwrap();
+    let out: String = ini
+        .lines()
+        .map(|l| if l.starts_with("modified=") { format!("modified={modified}\n") } else { format!("{l}\n") })
+        .collect();
+    std::fs::write(&path, out).unwrap();
+    let id = nb.id.as_str().to_string();
+    assert_eq!(store_load_info(&id, nb), 0);
+    assert_eq!(nb.modified, modified);
+}
+
+fn make_notebook(store: &str, name: &str, pages: u32, modified: i64) -> NotebookInfo {
     let mut nb = NotebookInfo::default();
     assert_eq!(store_create(name, "", PAPER_BLANK, &mut nb), 0);
     nb.page_ids = (1..=pages).collect();
     nb.next_page_id = pages + 1;
-    nb.modified = modified;
     assert_eq!(store_save_info(&mut nb), 0);
+    set_modified(store, &mut nb, modified);
     nb
 }
 
@@ -618,9 +638,9 @@ fn test_pdf_info_and_bg_worker(root: &Path, zk_home: &Path) {
 }
 
 fn test_zotero_source_sidecar_and_dedup(root: &Path, store: &str) {
-    let nb1 = make_notebook("Kuhn Older Notes", 2, 1732400100);
-    let nb2 = make_notebook("Kuhn Newer Notes", 2, 1732400900);
-    let nb_other = make_notebook("Smith Notes", 1, 1732400500);
+    let nb1 = make_notebook(store, "Kuhn Older Notes", 2, 1732400100);
+    let nb2 = make_notebook(store, "Kuhn Newer Notes", 2, 1732400900);
+    let nb_other = make_notebook(store, "Smith Notes", 1, 1732400500);
 
     let src1 = ZoteroNotebookSource {
         schema_version: 1,
@@ -717,7 +737,7 @@ fn test_zotero_source_sidecar_and_dedup(root: &Path, store: &str) {
 
 fn main() {
     if std::env::args().any(|a| a == "--list") {
-        println!("zotero_unified_checkpoint1: test");
+        println!("zotero_unified: test");
         return;
     }
 
@@ -751,8 +771,646 @@ fn main() {
     eprintln!("- test_zotero_source_sidecar_and_dedup");
     test_zotero_source_sidecar_and_dedup(&root, &store_str);
 
+    #[cfg(feature = "sim")]
+    phase2::run(&root);
+
     zk_sync_set_test_config(None);
     bridge_set_dir(None);
     let _ = std::fs::remove_dir_all(&root);
     done();
+}
+
+/// Phase 2 end to end: one `App` driven by contacts and ticks as the device's main loop drives it.
+#[cfg(feature = "sim")]
+mod phase2 {
+    use super::*;
+    use super::pdffix::{self, PageSpec};
+    use grimoire::library::{library_back, library_control_point, library_shortcut, library_zotero_control};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static CUTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn overflow_hook(text: &str, need: i32, have: i32) {
+        CUTS.lock().unwrap().push(format!("{text:?} needs {need} has {have}"));
+    }
+
+    const KUHN_TITLE: &str = "The Structure of Scientific Revolutions";
+    const CLOUD_TITLE: &str = "Attention Is All You Need";
+
+    const MOCK: &str = r#"#!/usr/bin/env python3
+import json
+import os
+import shutil
+import sys
+
+args = sys.argv[1:]
+home = os.environ["ZK_HOME"]
+
+def read(name, default=""):
+    p = os.path.join(home, name)
+    if not os.path.exists(p):
+        return default
+    with open(p, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+with open(os.path.join(home, "invocations.jsonl"), "a", encoding="utf-8") as lf:
+    lf.write(json.dumps({"args": args}) + "\n")
+
+mode = read("mode.txt", "ok")
+files = read("files_dir.txt")
+cat = json.loads(read("catalog.json"))
+cmd = args[0] if args else ""
+
+def pdf_path(item):
+    return os.path.join(files, item["attachment_key"], item["_file"])
+
+if cmd == "pull":
+    if mode == "offline":
+        sys.stderr.write("pull failed apiKey=SECRET999\n")
+        sys.exit(1)
+    open(os.path.join(home, "pulled.flag"), "w").close()
+    print('{"status":"ok"}')
+    sys.exit(0)
+
+if cmd == "export-index":
+    items = list(cat["items"])
+    if os.path.exists(os.path.join(home, "pulled.flag")):
+        items.append(cat["after_pull"])
+    out = []
+    for it in items:
+        o = {k: v for k, v in it.items() if k != "_file"}
+        cached = it["has_pdf"] and os.path.isfile(pdf_path(it))
+        o["pdf_cached"] = cached
+        o["pdf_local_path"] = pdf_path(it) if cached else ""
+        out.append(o)
+    doc = {"schema_version": 1, "exported_at": 1732400500, "item_count": len(out),
+           "collections": cat["collections"], "items": out}
+    tmp = args[1] + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+    os.replace(tmp, args[1])
+    print(json.dumps({"schema_version": 1, "exported_at": 1732400500, "item_count": len(out)}))
+    sys.exit(0)
+
+if cmd == "pdf-info":
+    att = args[1]
+    fetch = "--fetch" in args[2:]
+    item = next(i for i in cat["items"] if i["attachment_key"] == att)
+    path = pdf_path(item)
+    if fetch and mode == "offline":
+        sys.stderr.write("fetch failed: network unreachable apiKey=SECRET999\n")
+        sys.exit(1)
+    fetched = False
+    if fetch and not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        shutil.copyfile(os.path.join(home, "cloud_source.pdf"), path)
+        fetched = True
+    cached = os.path.isfile(path)
+    pages = json.loads(read("pages.json")) if cached else []
+    print(json.dumps({"schema_version": 1, "attachment_key": att, "parent_item_key": item["item_key"],
+                      "filename": item["_file"], "cached": cached, "fetched": fetched,
+                      "local_path": path if cached else "", "page_count": len(pages), "pages": pages}))
+    sys.exit(0)
+
+sys.stderr.write("unknown command\n")
+sys.exit(2)
+"#;
+
+    /// (item_key, attachment_key, title, authors, year, collection 0..3, kind)
+    const ITEMS: [(&str, &str, &str, &str, &str, usize, &str); 11] = [
+        ("ABCD1234", "ATTCACH1", KUHN_TITLE, "Thomas S. Kuhn", "1962", 0, "pdf"),
+        ("CLOUD001", "ATTCLOUD1", CLOUD_TITLE, "Ashish Vaswani et al.", "2017", 2, "pdf"),
+        ("EPUB0001", "ATTEPUB1", "Gödel, Escher, Bach", "Douglas R. Hofstadter", "1979", 2, "epub"),
+        ("SNAP0001", "ATTSNAP1", "Stanford Encyclopedia: Scientific Explanation", "James Woodward", "2021", 0, "snapshot"),
+        ("POPP0001", "ATTPOPP1", "The Logic of Scientific Discovery", "Karl Popper", "1959", 0, "pdf"),
+        ("LAKA0001", "ATTLAKA1", "The Methodology of Scientific Research Programmes", "Imre Lakatos", "1978", 0, "pdf"),
+        ("FEYE0001", "ATTFEYE1", "Against Method", "Paul Feyerabend", "1975", 0, "pdf"),
+        ("EINS0001", "ATTEINS1", "On the Electrodynamics of Moving Bodies", "Albert Einstein", "1905", 1, "pdf"),
+        ("FEYN0001", "ATTFEYN1", "Space-Time Approach to Quantum Electrodynamics", "Richard P. Feynman", "1949", 1, "pdf"),
+        ("SHAN0001", "ATTSHAN1", "A Mathematical Theory of Communication", "Claude E. Shannon", "1948", 2, "pdf"),
+        ("TURI0001", "ATTTURI1", "On Computable Numbers, with an Application to the Entscheidungsproblem", "Alan M. Turing", "1936", 2, "pdf"),
+    ];
+
+    const COLLECTIONS: [(&str, &str); 3] =
+        [("COLL0001", "Philosophy of Science"), ("COLL0002", "Physics"), ("COLL0003", "Computing")];
+
+    fn quoted(s: &str) -> String {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    fn item_json(key: &str, att: &str, title: &str, authors: &str, year: &str, col: usize, kind: &str) -> String {
+        format!(
+            "{{\"item_key\":{},\"attachment_key\":{},\"citation_key\":{},\"title\":{},\"authors\":{},\"year\":{},\
+             \"item_type\":\"book\",\"collections\":[{}],\"collection_keys\":[{}],\"tags\":[],\
+             \"has_pdf\":{},\"has_epub\":{},\"has_snapshot\":{},\"last_opened\":0,\"_file\":{}}}",
+            quoted(key),
+            quoted(att),
+            quoted(&format!("{}{year}", key.to_lowercase())),
+            quoted(title),
+            quoted(authors),
+            quoted(year),
+            quoted(COLLECTIONS[col].1),
+            quoted(COLLECTIONS[col].0),
+            kind == "pdf",
+            kind == "epub",
+            kind == "snapshot",
+            quoted(&format!("{}.pdf", key.to_lowercase())),
+        )
+    }
+
+    fn catalog_json() -> String {
+        let cols: Vec<String> = COLLECTIONS
+            .iter()
+            .map(|(k, n)| format!("{{\"key\":{},\"name\":{},\"parent_key\":\"\"}}", quoted(k), quoted(n)))
+            .collect();
+        let items: Vec<String> = ITEMS
+            .iter()
+            .map(|&(k, att, t, au, y, c, kind)| item_json(k, att, t, au, y, c, kind))
+            // (the cached PDF keeps its real file name)
+            .map(|j| j.replace("\"abcd1234.pdf\"", "\"kuhn1962.pdf\""))
+            .collect();
+        let extra = item_json("NOET0001", "ATTNOET1", "Invariant Variation Problems", "Emmy Noether", "1918", 1, "pdf");
+        format!(
+            "{{\"collections\":[{}],\"items\":[{}],\"after_pull\":{extra}}}",
+            cols.join(","),
+            items.join(",")
+        )
+    }
+
+    /// The geometry `zk-sync pdf-info` reports for `paper()`: page 2 is turned a quarter.
+    const PAGES_JSON: &str = r#"[
+        {"page_index":0,"width_pt":612.0,"height_pt":792.0,"rotation":0,"page_label":"1",
+         "crop_box":[0.0,0.0,612.0,792.0],"user_to_page":[1.0,0.0,0.0,-1.0,0.0,792.0]},
+        {"page_index":1,"width_pt":792.0,"height_pt":612.0,"rotation":90,"page_label":"2",
+         "crop_box":[0.0,0.0,612.0,792.0],"user_to_page":[0.0,1.0,1.0,0.0,0.0,0.0]}
+    ]"#;
+
+    /// A real 2-page PDF that looks enough like a paper to read in the screenshot.
+    fn paper(title: &str, authors: &str) -> Vec<u8> {
+        let text = |size: u32, x: u32, y: u32, s: &str| format!("0 g BT /F1 {size} Tf {x} {y} Td ({s}) Tj ET\n");
+        let page = |head: &str, sub: &str| {
+            let mut c = text(22, 64, 712, head);
+            c.push_str(&text(13, 64, 688, sub));
+            c.push_str("0 G 1 w 64 674 m 548 674 l S\n");
+            for i in 0..26u32 {
+                c.push_str(&text(11, 64, 646 - i * 20, "Normal science means research firmly based upon past scientific achievements."));
+            }
+            c
+        };
+        let first = PageSpec::new(612.0, 792.0, &page(title, authors));
+        let mut second = PageSpec::new(612.0, 792.0, &page("The Route to Normal Science", "Page 2"));
+        second.rotate = 90;
+        pdffix::make(&[first, second])
+    }
+
+    fn probe(a: &mut App, key: &str) -> String {
+        let mut out = String::new();
+        assert_eq!(app_probe(a, key, &mut out, 512), 0, "probe {key}");
+        out
+    }
+
+    fn zv(a: &mut App, key: &str) -> String {
+        probe(a, &format!("library.zotero.{key}"))
+    }
+
+    fn contact(a: &mut App, type_: InType, x: f32, y: f32, t_ms: u32) {
+        app_event(a, &InEvent { type_, x, y, t_ms, k_ms: t_ms, pressure: 0.5, ..Default::default() });
+    }
+
+    /// A finger tap on a named Library or Zotero view control.
+    fn tap(a: &mut App, name: &str) {
+        let (x, y) = library_control_point(a, name).unwrap_or_else(|| panic!("no control {name}"));
+        let t = now_ms();
+        contact(a, InType::TouchDown, x, y, t);
+        contact(a, InType::TouchUp, x, y, t.wrapping_add(60));
+        app_flush(a);
+    }
+
+    fn pen_stroke(a: &mut App) {
+        let (x, y, t) = (W as f32 * 0.25, H as f32 * 0.5, now_ms());
+        contact(a, InType::PenDown, x, y, t);
+        for k in 1..=40u32 {
+            let wave = if (k / 4) % 2 == 0 { 28.0 } else { -28.0 };
+            contact(a, InType::PenMove, x + 22.0 * k as f32, y + wave, t.wrapping_add(8 * k));
+        }
+        contact(a, InType::PenUp, x + 880.0, y, t.wrapping_add(340));
+        app_flush(a);
+    }
+
+    /// The main loop's ticks until `done` holds.
+    fn tick_until(a: &mut App, what: &str, mut done: impl FnMut(&mut App) -> bool) {
+        let t0 = Instant::now();
+        loop {
+            app_tick(a, now_ms());
+            app_flush(a);
+            if done(a) {
+                return;
+            }
+            if t0.elapsed() > Duration::from_secs(90) {
+                let screen = probe(a, "screen");
+                let toast = probe(a, "toast");
+                panic!("timed out waiting for {what}: screen {screen}, toast {toast:?}");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn open_view(a: &mut App) {
+        assert_eq!(probe(a, "screen"), "library");
+        tap(a, "zotero");
+        assert_eq!(zv(a, "open"), "1", "the Zotero view opens from the top bar");
+    }
+
+    fn search(a: &mut App, query: &str) {
+        check!(library_zotero_control(a, "filter", query));
+        app_flush(a);
+    }
+
+    fn open_pdf(a: &mut App, query: &str) {
+        open_view(a);
+        search(a, query);
+        check!(zv(a, "total") == "1");
+        tap(a, "zotero.open");
+        tick_until(a, "the Zotero PDF to open in the editor", |a| {
+            a.scr == ScreenId::Editor && a.zotero_import.is_none()
+        });
+    }
+
+    fn to_library(a: &mut App) {
+        check!(editor_shortcut(a, SHORTCUT_LIBRARY));
+        app_flush(a);
+        check!(probe(a, "screen") == "library");
+    }
+
+    fn notebooks() -> Vec<NotebookInfo> {
+        let mut v = Vec::new();
+        assert_eq!(store_list(&mut v), 0);
+        v
+    }
+
+    fn page_keys(a: &mut App) -> Vec<String> {
+        let rows: usize = zv(a, "rows").parse().unwrap();
+        (1..=rows).map(|i| zv(a, &format!("key.{i}"))).collect()
+    }
+
+    fn library_view(a: &mut App, bridge: &Path, zk_home: &Path) {
+        // Without the bridge there is no top-bar button; with it there is.
+        bridge_set_dir(Some(&bridge.with_extension("absent").to_string_lossy()));
+        app_switch(a, ScreenId::Library);
+        check!(library_control_point(a, "zotero").is_none());
+        bridge_set_dir(Some(&bridge.to_string_lossy()));
+        app_switch(a, ScreenId::Library);
+        check!(library_control_point(a, "zotero").is_some());
+
+        // No library_index.json yet: opening the view exports one in the background.
+        check!(!bridge.join(LIBRARY_INDEX_FILE).exists());
+        let _ = take_invocations(zk_home);
+        open_view(a);
+        tick_until(a, "the first catalog export", |a| zv(a, "total") == "11");
+        let calls = take_invocations(zk_home);
+        check!(calls.len() == 1 && calls[0].contains("export-index"));
+
+        check!(probe(a, "library.sheet") == "zotero");
+        check!(zv(a, "pages") == "2" && zv(a, "page") == "1" && zv(a, "rows") == "9");
+        let mut keys = page_keys(a);
+        tap(a, "zotero.next");
+        check!(zv(a, "page") == "2" && zv(a, "rows") == "2");
+        keys.extend(page_keys(a));
+        check!(library_control_point(a, "zotero.next").is_none());
+        tap(a, "zotero.prev");
+        check!(zv(a, "page") == "1" && zv(a, "rows") == "9");
+        let mut want: Vec<String> = ITEMS.iter().map(|i| i.0.to_string()).collect();
+        keys.sort();
+        want.sort();
+        check!(keys == want);
+
+        // Hardware page turns move through the same pages.
+        check!(library_shortcut(a, SHORTCUT_NEXT_PAGE));
+        check!(zv(a, "page") == "2");
+        check!(library_shortcut(a, SHORTCUT_PREV_PAGE));
+        check!(zv(a, "page") == "1");
+
+        // The collection control cycles All -> each collection -> All.
+        for (name, total) in [("Philosophy of Science", "5"), ("Physics", "2"), ("Computing", "4"), ("All", "11")] {
+            tap(a, "zotero.collection");
+            check!(zv(a, "collection") == name);
+            check!(zv(a, "total") == total);
+        }
+
+        // Search: by author, no match, cleared by its x; the keyboard opens and Back closes it.
+        search(a, "turing");
+        check!(zv(a, "total") == "1" && zv(a, "key.1") == "TURI0001");
+        search(a, "no such paper");
+        check!(zv(a, "total") == "0" && zv(a, "rows") == "0" && zv(a, "selected") == "0");
+        tap(a, "zotero.clear");
+        check!(zv(a, "total") == "11" && zv(a, "filter").is_empty());
+        tap(a, "zotero.search");
+        check!(zv(a, "keyboard") == "1");
+        check!(library_back(a));
+        check!(zv(a, "keyboard") == "0" && zv(a, "open") == "1");
+
+        for (query, badge) in [("kuhn", "PDF · Ready"), ("vaswani", "PDF · Cloud"), ("escher", "EPUB"), ("woodward", "Snapshot")] {
+            search(a, query);
+            check!(zv(a, "badge.1") == badge);
+        }
+        search(a, "");
+
+        // Sync: pull then export-index on the background thread, picked up by app_tick.
+        let _ = take_invocations(zk_home);
+        tap(a, "zotero.sync");
+        tick_until(a, "Sync to finish", |a| zv(a, "total") == "12");
+        let calls = take_invocations(zk_home);
+        check!(calls.len() == 2 && calls[0].contains("\"pull\"") && calls[1].contains("export-index"));
+        check!(zv(a, "status") == "Synced 12 items in Zotero catalog.");
+
+        // Back to the 11-item catalog for the rest.
+        std::fs::remove_file(zk_home.join("pulled.flag")).unwrap();
+        tap(a, "zotero.refresh");
+        tick_until(a, "Refresh to finish", |a| zv(a, "total") == "11");
+        tap(a, "zotero.close");
+        check!(zv(a, "open") == "0");
+    }
+
+    fn cached_import_and_dedup(a: &mut App, bridge: &Path, zk_home: &Path) {
+        let cached = bridge.join("files").join("ATTCACH1").join("kuhn1962.pdf");
+        check!(notebooks().is_empty());
+        let _ = take_invocations(zk_home);
+        open_pdf(a, "kuhn");
+
+        let calls = take_invocations(zk_home);
+        check!(calls.iter().any(|c| c.contains("pdf-info") && c.contains("ATTCACH1")));
+        check!(!calls.iter().any(|c| c.contains("--fetch")));
+
+        let books = notebooks();
+        assert_eq!(books.len(), 1, "one notebook per attachment");
+        let id = books[0].id.as_str().to_string();
+        check!(books[0].name.as_str() == KUHN_TITLE);
+        check!(books[0].npages() == 2);
+        check!(probe(a, "editor.notebook_id") == id);
+        check!(probe(a, "editor.page") == "1" && probe(a, "editor.pages") == "2");
+        check!(cached.is_file()); // (read in place, never moved away from the bridge)
+
+        let src = zotero_source_load(&id).expect("zotero_source.json is bound");
+        check!(src.item_key == "ABCD1234" && src.attachment_key == "ATTCACH1");
+        check!(src.citation_key == "abcd12341962");
+        check!(src.title == KUHN_TITLE && src.authors == "Thomas S. Kuhn" && src.year == "1962");
+        check!(Path::new(&src.pdf_local_path) == cached);
+        assert_eq!(src.pages.len(), 2);
+        check!(src.page_count == 2);
+        let (p0, p1) = (&src.pages[0], &src.pages[1]);
+        check!(p0.width_pt == 612.0 && p0.height_pt == 792.0 && p0.rotation == 0);
+        check!(p0.user_to_page == [1.0, 0.0, 0.0, -1.0, 0.0, 792.0]);
+        check!(p1.width_pt == 792.0 && p1.height_pt == 612.0 && p1.rotation == 90);
+        check!(p1.user_to_page == [0.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+
+        check!(probe(a, "editor.strokes") == "0");
+        pen_stroke(a);
+        check!(probe(a, "editor.strokes") == "1");
+        check!(editor_shortcut(a, SHORTCUT_NEXT_PAGE));
+        app_flush(a);
+        check!(probe(a, "editor.page") == "2" && probe(a, "editor.strokes") == "0");
+        to_library(a);
+
+        // The same item again: the bound notebook reopens, on the page left, with no new import.
+        let _ = take_invocations(zk_home);
+        open_view(a);
+        search(a, "kuhn");
+        check!(zv(a, "badge.1") == "PDF · Notes");
+        tap(a, "zotero.open");
+        check!(probe(a, "screen") == "editor");
+        check!(a.zotero_import.is_none());
+        check!(take_invocations(zk_home).is_empty());
+        check!(notebooks().len() == 1);
+        check!(probe(a, "editor.notebook_id") == id);
+        check!(probe(a, "editor.page") == "2");
+        check!(editor_shortcut(a, SHORTCUT_PREV_PAGE));
+        app_flush(a);
+        check!(probe(a, "editor.page") == "1" && probe(a, "editor.strokes") == "1");
+        to_library(a);
+    }
+
+    fn cloud_fetch(a: &mut App, bridge: &Path, zk_home: &Path, store: &Path) {
+        let dest = bridge.join("files").join("ATTCLOUD1").join("cloud001.pdf");
+        std::fs::write(zk_home.join("cloud_source.pdf"), paper(CLOUD_TITLE, "Ashish Vaswani et al., 2017")).unwrap();
+
+        // Offline: the Library stays, the error is said without the secret.
+        set_mock_mode(zk_home, "offline");
+        let _ = take_invocations(zk_home);
+        open_view(a);
+        search(a, "vaswani");
+        tap(a, "zotero.open");
+        tick_until(a, "the offline fetch to fail", |a| a.zotero_import.is_none());
+        check!(take_invocations(zk_home).iter().any(|c| c.contains("--fetch")));
+        check!(probe(a, "screen") == "library" && zv(a, "open") == "1");
+        let toast = probe(a, "toast");
+        let status = zv(a, "status");
+        check!(toast.contains("network unreachable") && toast.contains("[REDACTED]"));
+        check!(status.contains("[REDACTED]"));
+        check!(!toast.contains("SECRET999") && !status.contains("SECRET999"));
+        check!(!probe(a, "notice").contains("SECRET999"));
+        let log = std::fs::read(store.join("grimoire.log")).unwrap_or_default();
+        check!(!String::from_utf8_lossy(&log).contains("SECRET999"));
+        check!(!dest.exists());
+        check!(notebooks().len() == 1);
+
+        // Online: the same tap downloads, imports and opens.
+        set_mock_mode(zk_home, "ok");
+        let _ = take_invocations(zk_home);
+        tap(a, "zotero.open");
+        tick_until(a, "the fetched PDF to open in the editor", |a| {
+            a.scr == ScreenId::Editor && a.zotero_import.is_none()
+        });
+        check!(take_invocations(zk_home).iter().any(|c| c.contains("--fetch")));
+        check!(dest.is_file());
+        check!(notebooks().len() == 2);
+        let id = probe(a, "editor.notebook_id");
+        check!(probe(a, "editor.pages") == "2");
+        let src = zotero_source_load(&id).expect("fetched PDF is bound");
+        check!(src.item_key == "CLOUD001" && src.attachment_key == "ATTCLOUD1");
+        check!(src.title == CLOUD_TITLE && src.pages.len() == 2 && src.pages[1].rotation == 90);
+        to_library(a);
+    }
+
+    fn fallback_to_zotero(a: &mut App, zk_home: &Path) {
+        // The Open button for the EPUB; a tap on the already selected row for the snapshot.
+        for (query, control, item, att) in [
+            ("escher", "zotero.open", "EPUB0001", "ATTEPUB1"),
+            ("woodward", "zotero.row.1", "SNAP0001", "ATTSNAP1"),
+        ] {
+            handoff_clear();
+            app_switch(a, ScreenId::Library);
+            open_view(a);
+            search(a, query);
+            let _ = take_invocations(zk_home);
+            tap(a, control);
+            check!(!a.running && a.exit_code == 42);
+            let h = handoff_peek().expect("handoff.json is written");
+            check!(h.target_enum() == Some(HandoffTarget::Zotero));
+            check!(h.zotero.item_key == item && h.zotero.attachment_key == att);
+            check!(a.zotero_import.is_none() && take_invocations(zk_home).is_empty());
+            check!(notebooks().len() == 2);
+            handoff_clear();
+            a.running = true;
+            a.exit_code = 0;
+        }
+        app_switch(a, ScreenId::Library);
+    }
+
+    /// Nothing was cut since the last call.
+    fn fits(theme: UiTheme, place: &str) {
+        let cuts = std::mem::take(&mut *CUTS.lock().unwrap());
+        if !cuts.is_empty() {
+            eprintln!("  cut ({theme:?}, {place}): {cuts:?}");
+        }
+        check!(cuts.is_empty());
+    }
+
+    fn save_png(a: &App, path: &Path) {
+        let c = &a.screen;
+        let name = std::ffi::CString::new(path.to_string_lossy().into_owned()).unwrap();
+        // SAFETY: name is NUL-terminated; c.px holds c.h rows of c.w gray bytes, c.stride apart.
+        let rc = unsafe {
+            grimoire::ffi_stb::stbi_write_png(name.as_ptr(), c.w, c.h, 1, c.px.as_ptr() as *const _, c.stride)
+        };
+        check!(rc != 0);
+        let png = std::fs::read(path).unwrap_or_default();
+        check!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    fn layout_and_screenshots(a: &mut App, root: &Path) {
+        let default_theme = ui_theme();
+        let use_theme = |a: &mut App, t: UiTheme| {
+            a.settings.theme = t as i32;
+            ui_set_theme(t);
+        };
+        for theme in [UiTheme::Gothic, UiTheme::Classic] {
+            use_theme(a, theme);
+            app_toast_dismiss(a);
+            CUTS.lock().unwrap().clear();
+            app_switch(a, ScreenId::Library);
+            app_flush(a);
+            check!(library_control_point(a, "zotero").is_some());
+            fits(theme, "Library home");
+
+            open_view(a);
+            fits(theme, "Zotero view, page 1");
+            tap(a, "zotero.next");
+            fits(theme, "Zotero view, page 2");
+            for _ in 0..4 {
+                tap(a, "zotero.collection");
+                fits(theme, "Zotero view, a collection");
+            }
+            for query in ["escher", "kuhn", "no such paper"] {
+                search(a, query);
+                fits(theme, query);
+            }
+            search(a, "");
+            fits(theme, "Zotero view, cleared");
+
+            search(a, "kuhn");
+            CUTS.lock().unwrap().clear();
+            tap(a, "zotero.open");
+            check!(probe(a, "screen") == "editor");
+            app_toast_dismiss(a);
+            let _ = probe(a, "editor.screen_composed"); // (draws the whole editor under the hook)
+            fits(theme, "Zotero PDF in the editor");
+            to_library(a);
+        }
+        use_theme(a, default_theme);
+
+        let mut dirs = vec![root.join("shots")];
+        if let Some(d) = std::env::var_os("GRIMOIRE_ZOTERO_SAVE_SHOTS").filter(|d| !d.is_empty()) {
+            dirs.push(PathBuf::from(d));
+        }
+        for d in &dirs {
+            std::fs::create_dir_all(d).unwrap();
+        }
+
+        app_toast_dismiss(a);
+        app_switch(a, ScreenId::Library);
+        open_view(a);
+        app_flush(a);
+        for d in &dirs {
+            save_png(a, &d.join("desktop_zotero_library_view.png"));
+        }
+
+        search(a, "kuhn");
+        tap(a, "zotero.open");
+        check!(probe(a, "screen") == "editor");
+        if probe(a, "editor.page") != "1" {
+            check!(editor_shortcut(a, SHORTCUT_PREV_PAGE));
+        }
+        app_toast_dismiss(a);
+        app_flush(a);
+        check!(probe(a, "editor.strokes") == "1");
+        check!(probe(a, "editor.screen_composed") == "1");
+        for d in &dirs {
+            save_png(a, &d.join("desktop_zotero_opened_pdf.png"));
+        }
+        to_library(a);
+    }
+
+    pub fn run(base: &Path) {
+        let root = base.join("phase2");
+        let storage = root.join("us");
+        let bridge = storage.join("zotero-bridge");
+        let store = storage.join("grimoire");
+        let zk_home = root.join("zk-home");
+        let bin = root.join("bin").join("zk-sync");
+        for d in [&bridge, &store, &zk_home, &storage.join("documents"), &bridge.join("files").join("ATTCACH1")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(
+            bridge.join("files").join("ATTCACH1").join("kuhn1962.pdf"),
+            paper(KUHN_TITLE, "Thomas S. Kuhn, 1962"),
+        )
+        .unwrap();
+        write_mock_zk_sync(&bin);
+        std::fs::write(&bin, MOCK).unwrap(); // (keeps the executable bit)
+        std::fs::write(zk_home.join("files_dir.txt"), bridge.join("files").to_string_lossy().as_bytes()).unwrap();
+        std::fs::write(zk_home.join("catalog.json"), catalog_json()).unwrap();
+        std::fs::write(zk_home.join("pages.json"), PAGES_JSON).unwrap();
+
+        std::env::set_var("GRIMOIRE_STORAGE", &storage);
+        std::env::set_var("GRIMOIRE_WORK_EXE", env!("CARGO_BIN_EXE_grimoire-headless"));
+        std::env::set_var("GRIMOIRE_SCRIPT", "/dev/null");
+        bridge_set_dir(Some(&bridge.to_string_lossy()));
+        zk_sync_set_test_config(Some(ZkSyncConfig {
+            bin: bin.to_string_lossy().into_owned(),
+            zk_home: zk_home.to_string_lossy().into_owned(),
+            zk_config_dir: root.join("zk-config").to_string_lossy().into_owned(),
+            local_timeout_ms: 20_000,
+            network_timeout_ms: 20_000,
+        }));
+        zk_bg_reset();
+
+        let (mut dw, mut dh, mut ddpi) = (0, 0, 0.0);
+        let _ = display_open(&mut dw, &mut dh, &mut ddpi);
+        assert_eq!(store_init(&store.to_string_lossy()), 0);
+        let mut a = App::default();
+        assert_eq!(app_init(&mut a, W, H, DPI), 0);
+        app_toast_dismiss(&mut a);
+        app_flush(&mut a);
+        font_set_overflow_hook(Some(overflow_hook));
+
+        eprintln!("- phase2_library_view");
+        library_view(&mut a, &bridge, &zk_home);
+        eprintln!("- phase2_cached_import_and_dedup");
+        cached_import_and_dedup(&mut a, &bridge, &zk_home);
+        eprintln!("- phase2_cloud_fetch");
+        cloud_fetch(&mut a, &bridge, &zk_home, &store);
+        eprintln!("- phase2_fallback_to_zotero");
+        fallback_to_zotero(&mut a, &zk_home);
+        eprintln!("- phase2_layout_and_screenshots");
+        layout_and_screenshots(&mut a, &root);
+
+        font_set_overflow_hook(None);
+        tick_until(&mut a, "background jobs to finish", |_| !bg_busy());
+        app_shutdown(&mut a);
+        display_close();
+        for v in ["GRIMOIRE_STORAGE", "GRIMOIRE_WORK_EXE", "GRIMOIRE_SCRIPT"] {
+            std::env::remove_var(v);
+        }
+    }
 }

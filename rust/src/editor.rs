@@ -1105,6 +1105,33 @@ fn zotero_open_ref(a: &mut App, z: &Zref) {
     }
 }
 
+fn zotero_open_pdf_row(a: &mut App, row: &ZoteroSheetRow) {
+    let place = {
+        let s = ed_ref(a);
+        if !s.open || s.nb.id.is_empty() {
+            None
+        } else {
+            Some(crate::zotero_bridge::Handoff::return_to(
+                s.nb.id.as_str(),
+                s.open_pid(),
+                s.index.max(0) as u32,
+            ))
+        }
+    };
+    zotero_save(a);
+    let item = row.item.clone().unwrap_or_else(|| ZoteroLibraryItem {
+        item_key: row.item_key.clone(),
+        attachment_key: row.attachment_key.clone(),
+        title: row.label.clone(),
+        has_pdf: row.has_pdf,
+        pdf_cached: row.pdf_cached,
+        has_epub: row.has_epub,
+        has_snapshot: row.has_snapshot,
+        ..Default::default()
+    });
+    crate::app::zotero_open_item(a, &item, row.page, place);
+}
+
 /// What the sheet asked for: the editor owns the sidecar, the pending inbox and the handoff.
 fn zotero_result(a: &mut App, r: ZsResult, d: Rect) {
     let consume = matches!(r, ZsResult::Cite(_));
@@ -1127,6 +1154,7 @@ fn zotero_result(a: &mut App, r: ZsResult, d: Rect) {
             compose_all(a, RefreshMode::Full);
         }
         ZsResult::Open(row) => zotero_open_row(a, &row),
+        ZsResult::OpenPdf(row) => zotero_open_pdf_row(a, &row),
         ZsResult::Discard(row) => {
             zotero_consume(a, row.id.as_str());
             with_modal(a, |s| &mut s.zsheet, |z, _| { zotero_sheet_refresh(z); });
@@ -1142,6 +1170,66 @@ fn zotero_show(a: &mut App) {
     }
     with_modal(a, |s| &mut s.zsheet, |z, a| { zotero_sheet_open(z, a); });
     compose_all(a, RefreshMode::Ui);
+}
+
+/// Close the editor's Zotero sheet if open.
+pub fn editor_close_zotero_sheet(a: &mut App) {
+    if a.ed.as_deref().is_some_and(|s| s.zsheet.open) {
+        with_modal(a, |s| &mut s.zsheet, |z, _| zotero_sheet_close(z));
+        if a.scr == ScreenId::Editor && !a.asleep && ed_ref(a).open {
+            compose_all(a, RefreshMode::Ui);
+        }
+    }
+}
+
+/// Refresh the editor's Zotero sheet after a background `zk-sync` refresh/pull finishes.
+pub fn editor_zotero_on_refresh(a: &mut App, status: Option<&str>) {
+    if !a.ed.as_deref().is_some_and(|s| s.open && s.zsheet.open) {
+        return;
+    }
+    with_modal(a, |s| &mut s.zsheet, |z, _| {
+        match status {
+            Some(msg) => zotero_sheet_set_status(z, msg),
+            None => z.custom_status.clear(),
+        }
+        zotero_sheet_refresh(z);
+    });
+    if a.scr == ScreenId::Editor && !a.asleep {
+        compose_all(a, RefreshMode::Ui);
+    }
+}
+
+/// Update the status line of an open editor Zotero sheet (scrubbed) and repaint if visible.
+pub fn editor_zotero_set_status(a: &mut App, status: &str) {
+    if !a.ed.as_deref().is_some_and(|s| s.open && s.zsheet.open) {
+        return;
+    }
+    with_modal(a, |s| &mut s.zsheet, |z, _| {
+        zotero_sheet_set_status(z, status);
+    });
+    if a.scr == ScreenId::Editor && !a.asleep {
+        compose_all(a, RefreshMode::Ui);
+    }
+}
+
+/// Programmatic control entry point for the editor's Zotero sheet.
+pub fn editor_zotero_control(a: &mut App, key: &str, value: &str) -> bool {
+    if a.scr != ScreenId::Editor || !a.ed.as_deref().is_some_and(|s| s.open) {
+        return false;
+    }
+    if key == "show" {
+        zotero_show(a);
+        return a.ed.as_deref().is_some_and(|s| s.zsheet.open);
+    }
+    if !a.ed.as_deref().is_some_and(|s| s.zsheet.open) {
+        return false;
+    }
+    let r = with_modal(a, |s| &mut s.zsheet, |z, a| zotero_sheet_control(z, a, key, value));
+    let acted = r != ZsResult::None;
+    if acted {
+        zotero_result(a, r, RECT_EMPTY);
+    }
+    acted
 }
 
 pub fn editor_zotero_return_handoff(a: &mut App) {
@@ -10094,7 +10182,7 @@ pub fn editor_keyboard_area(a: &App) -> Option<Rect> {
     if !s.open {
         return None;
     }
-    [&s.map_kb, &s.pv.kb, &s.find.kb, &s.lm.kb, &s.card.kb, &s.add_kb].into_iter().find(|k| k.open && !rect_is_empty(k.area)).map(|k| k.area)
+    [&s.map_kb, &s.pv.kb, &s.find.kb, &s.zsheet.kb, &s.lm.kb, &s.card.kb, &s.add_kb].into_iter().find(|k| k.open && !rect_is_empty(k.area)).map(|k| k.area)
 }
 
 /// Where a key pressed on the notebook acts (actions.rs app_place): its Graph, its Pages view, else the page.
@@ -11520,7 +11608,7 @@ fn corner_sheet_open(s: &EditorState) -> bool {
 /// corner's square (one docked at the bottom, with the corner at the bottom).
 fn keyboard_over_corner(a: &App, s: &EditorState) -> bool {
     let sq = status_square(a);
-    [&s.card.kb, &s.lm.kb, &s.find.kb, &s.add_kb].iter().any(|kb| kb.open && rect_overlaps(kb.area, sq))
+    [&s.card.kb, &s.lm.kb, &s.find.kb, &s.zsheet.kb, &s.add_kb].iter().any(|kb| kb.open && rect_overlaps(kb.area, sq))
 }
 
 /// Whether (x, y) is on a surface of the card, Link to..., Find PICK or the strip: a control, never the corner's.
@@ -11535,6 +11623,7 @@ fn phase2_surface_at(s: &EditorState, x: i32, y: i32) -> bool {
         || kb_at(&s.card.kb)
         || kb_at(&s.lm.kb)
         || kb_at(&s.find.kb)
+        || kb_at(&s.zsheet.kb)
         || kb_at(&s.add_kb)
 }
 
@@ -11593,7 +11682,7 @@ fn fs_can_arm(a: &App, in_links_bar: bool) -> bool {
         return false;
     }
     if s.pv.open || s.tools_open || s.widgets_open || s.mb.open || s.dm.open || s.paper_open || s.ts.open || s.find.open || s.zsheet.open || s.lt.open || s.card.open || s.qs.open
-        || s.lm.state != LmState::Off || s.pv.kb.open || s.find.kb.open || s.lm.kb.open || s.card.kb.open || s.add_kb.open
+        || s.lm.state != LmState::Off || s.pv.kb.open || s.find.kb.open || s.zsheet.kb.open || s.lm.kb.open || s.card.kb.open || s.add_kb.open
     {
         return false;
     }
@@ -12296,7 +12385,9 @@ fn editor_event_in(a: &mut App, ev: &InEvent) {
         // The Zotero sheet takes every contact while it is up, like Find: a contact outside it closes it
         // (a finger at the lift, a pen at its down).
         if s.zsheet.open {
-            if rect_contains(s.zsheet.rect, ev.x as i32, ev.y as i32) {
+            if (s.zsheet.kb.open && rect_contains(s.zsheet.kb.area, ev.x as i32, ev.y as i32))
+                || rect_contains(s.zsheet.rect, ev.x as i32, ev.y as i32)
+            {
                 s.owner = Owner::Zotero;
                 let mut d = RECT_EMPTY;
                 let r = with_modal(a, |s| &mut s.zsheet, |z, a| zotero_sheet_pointer(z, a, 0, ev, &mut d));
@@ -13231,6 +13322,10 @@ pub fn editor_tick(a: &mut App, now: u32) {
     if s.open && s.find.open && with_find(a, |f, a, nb, nav| findsheet_tick(f, a, nb, nav, now)) == FsResult::Changed {
         find_result(a, FsResult::Changed, RECT_EMPTY);
     }
+    let s = ed(a);
+    if s.open && s.zsheet.open && with_modal(a, |s| &mut s.zsheet, |z, a| zotero_sheet_tick(z, a, now)) {
+        zotero_result(a, ZsResult::Changed, RECT_EMPTY);
+    }
     // Rename's keyboard on a link's card (its typing through the keyboard host, as every keyboard's): a held
     // delete's repeats, and its grayscale refresh once typing pauses.
     let s = ed(a);
@@ -13853,11 +13948,13 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
         }
         csnprintf!(out, cap, "%s", &v);
     } else if key == "kb_dock" {
-        // Where the keyboard in front is docked (Find, Rename, New page...): top or bottom; empty for none.
+        // Where the keyboard in front is docked (Find, Zotero, Rename, New page...): top or bottom; empty for none.
         let kb = if s.map_kb.open {
             Some(&s.map_kb)
         } else if s.find.open {
             Some(&s.find.kb)
+        } else if s.zsheet.open && s.zsheet.kb.open {
+            Some(&s.zsheet.kb)
         } else if s.card.kb.open {
             Some(&s.card.kb)
         } else if s.lm.kb.open {
@@ -13982,15 +14079,17 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
             return -1;
         }
     } else if (key == "keyboard" || key == "text" || key == "caret")
-        && (s.map_kb.open || s.find.open || s.card.kb.open || s.add_kb.open || s.lm.kb.open)
+        && (s.map_kb.open || s.find.open || (s.zsheet.open && s.zsheet.kb.open) || s.card.kb.open || s.add_kb.open || s.lm.kb.open)
     {
-        // The keyboard up over the page: the Graph's Rename, Find's (the Pages view's, otherwise), the card's Rename,
-        // the toolbar's count pad, New page...'s. Its title, what the field holds, or that with its caret (and a
-        // selection) drawn in (keyboard_caret_probe).
+        // The keyboard up over the page: the Graph's Rename, Find's (the Pages view's, otherwise), Zotero's Search,
+        // the card's Rename, the toolbar's count pad, New page...'s. Its title, what the field holds, or that with
+        // its caret (and a selection) drawn in (keyboard_caret_probe).
         let kb = if s.map_kb.open {
             &s.map_kb
         } else if s.find.open {
             &s.find.kb
+        } else if s.zsheet.open && s.zsheet.kb.open {
+            &s.zsheet.kb
         } else if s.card.kb.open {
             &s.card.kb
         } else if s.add_kb.open {

@@ -177,6 +177,28 @@ pub struct App {
     /// The question on the screen that asks before something is deleted (app_ask), and how far its frame is:
     /// drawn, or on the panel since when. A contact answers it only once it has been shown (app_asked_seen).
     pub asked: Asked,
+    /// In-flight Zotero PDF inspection/fetch/import queued from ZoteroView or ZoteroSheet.
+    pub zotero_import: Option<ZoteroPendingImport>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ZoteroImportPhase {
+    FetchingInfo {
+        fetch_attempted: bool,
+    },
+    Importing {
+        job_id: String,
+        src: String,
+        info: crate::zotero_sync::ZkPdfInfo,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct ZoteroPendingImport {
+    pub item: crate::zotero_bridge::ZoteroLibraryItem,
+    pub page: u32,
+    pub return_to: Option<crate::zotero_bridge::ReturnPlace>,
+    pub phase: ZoteroImportPhase,
 }
 
 /// A question that asks before something is deleted (`Delete "name"?`, Files' and the Library's) must be seen
@@ -1391,6 +1413,8 @@ pub enum NoticeKey {
     Loading,
     /// previews being made for the file browser (2.2)
     Previews,
+    /// Zotero catalog sync, PDF download, or direct PDF import
+    Zotero,
     /// KOReader's book being added
     Book,
     /// a PDF import (2.1.0-beta.2)
@@ -1398,7 +1422,14 @@ pub enum NoticeKey {
 }
 
 impl NoticeKey {
-    const ALL: [NoticeKey; 5] = [NoticeKey::FontCheck, NoticeKey::Loading, NoticeKey::Previews, NoticeKey::Book, NoticeKey::Import];
+    const ALL: [NoticeKey; 6] = [
+        NoticeKey::FontCheck,
+        NoticeKey::Loading,
+        NoticeKey::Previews,
+        NoticeKey::Zotero,
+        NoticeKey::Book,
+        NoticeKey::Import,
+    ];
 
     /// its name for the runner's notice.key
     pub fn name(self) -> &'static str {
@@ -1406,6 +1437,7 @@ impl NoticeKey {
             NoticeKey::FontCheck => "fontcheck",
             NoticeKey::Loading => "loading",
             NoticeKey::Previews => "previews",
+            NoticeKey::Zotero => "zotero",
             NoticeKey::Book => "book",
             NoticeKey::Import => "import",
         }
@@ -1419,7 +1451,7 @@ pub const NOTICE_EVERY_MS: u32 = 2000;
 /// panel shows of it. Drawn like a toast: overlaid for its presents, never stored in App.screen.
 #[derive(Default)]
 pub struct Notice {
-    asked: [(FixedStr<256>, ScreenId); 5],
+    asked: [(FixedStr<256>, ScreenId); 6],
     /// the key and text on the panel, and where (empty: nothing of it is on the panel)
     shown: Option<NoticeKey>,
     shown_text: FixedStr<256>,
@@ -1456,7 +1488,7 @@ fn notice_pick(a: &App) -> Option<NoticeKey> {
         let (text, asker) = &a.notice.asked[k as usize];
         !text.is_empty()
             && match k {
-                NoticeKey::FontCheck | NoticeKey::Loading | NoticeKey::Previews => a.scr == *asker,
+                NoticeKey::FontCheck | NoticeKey::Loading | NoticeKey::Previews | NoticeKey::Zotero => a.scr == *asker,
                 NoticeKey::Book => true,
                 NoticeKey::Import => a.scr == ScreenId::Library && !crate::library::library_import_place_up(a),
             }
@@ -2147,6 +2179,388 @@ pub fn app_import_rescan(a: &mut App, entering: bool) {
     import_scan(a.dpi);
 }
 
+fn open_zotero_notebook(a: &mut App, nb_id: &str, page_one_based: u32) {
+    app_notice_clear(a, NoticeKey::Zotero);
+    crate::library::library_close_zotero_modal(a);
+    crate::editor::editor_close_zotero_sheet(a);
+    if page_one_based > 0 {
+        let mut nb = NotebookInfo::default();
+        if store_load_info(nb_id, &mut nb) == 0 {
+            if let Some(&pid) = nb.page_ids.get((page_one_based - 1) as usize) {
+                editor_open_notebook_at(a, nb_id, pid, false);
+                return;
+            }
+        }
+    }
+    editor_open_notebook(a, nb_id);
+}
+
+fn zotero_import_src(a: &App) -> Option<String> {
+    match &a.zotero_import {
+        Some(ZoteroPendingImport {
+            phase: ZoteroImportPhase::Importing { src, .. },
+            ..
+        }) => Some(src.clone()),
+        _ => None,
+    }
+}
+
+fn zotero_import_matches(a: &App, done_id: &str, done_src: Option<&str>) -> bool {
+    match &a.zotero_import {
+        Some(ZoteroPendingImport {
+            phase: ZoteroImportPhase::Importing { job_id, src, .. },
+            ..
+        }) => {
+            (!job_id.is_empty() && !done_id.is_empty() && job_id == done_id)
+                || done_src.is_some_and(|s| s == src)
+        }
+        _ => false,
+    }
+}
+
+fn zotero_begin_pdf_import(
+    a: &mut App,
+    item: crate::zotero_bridge::ZoteroLibraryItem,
+    page: u32,
+    return_to: Option<crate::zotero_bridge::ReturnPlace>,
+    info: crate::zotero_sync::ZkPdfInfo,
+) {
+    if let Some(nb_id) = crate::zotero_sync::find_notebook_by_attachment_key(&info.attachment_key) {
+        open_zotero_notebook(a, &nb_id, page);
+        return;
+    }
+    let sp = match crate::zotero_sync::zotero_pdf_storage_path(&info) {
+        Ok(sp) => sp,
+        Err(e) => {
+            a.zotero_import = None;
+            app_notice_clear(a, NoticeKey::Zotero);
+            let msg = crate::zotero_sync::scrub_error_message(&e);
+            let shown = if msg.is_empty() {
+                "Couldn't stage PDF for import.".to_string()
+            } else {
+                msg
+            };
+            crate::library::library_zotero_set_status(a, &shown);
+            crate::editor::editor_zotero_set_status(a, &shown);
+            app_toast(a, &shown, 5000);
+            return;
+        }
+    };
+    let Ok(src_str) = String::from_utf8(sp.as_bytes().to_vec()) else {
+        a.zotero_import = None;
+        app_notice_clear(a, NoticeKey::Zotero);
+        app_toast(a, "Invalid staged PDF path.", 4000);
+        return;
+    };
+    let nb_title = crate::zotero_sync::zotero_clean_notebook_title(&item, &info);
+    match crate::pdfimport::pdf_import_queue(&sp, Some(&nb_title), None, a.dpi) {
+        crate::pdfimport::Queued::Started(job_id) => {
+            let st = "Importing PDF into Grimoire...";
+            a.zotero_import = Some(ZoteroPendingImport {
+                item,
+                page,
+                return_to,
+                phase: ZoteroImportPhase::Importing {
+                    job_id,
+                    src: src_str,
+                    info,
+                },
+            });
+            app_notice(a, NoticeKey::Zotero, st);
+            crate::library::library_zotero_set_status(a, st);
+            crate::editor::editor_zotero_set_status(a, st);
+        }
+        crate::pdfimport::Queued::Waiting | crate::pdfimport::Queued::AlreadyRunning => {
+            let st = "Importing PDF into Grimoire...";
+            a.zotero_import = Some(ZoteroPendingImport {
+                item,
+                page,
+                return_to,
+                phase: ZoteroImportPhase::Importing {
+                    job_id: String::new(),
+                    src: src_str,
+                    info,
+                },
+            });
+            app_notice(a, NoticeKey::Zotero, st);
+            crate::library::library_zotero_set_status(a, st);
+            crate::editor::editor_zotero_set_status(a, st);
+        }
+        crate::pdfimport::Queued::Refused(_) => {
+            a.zotero_import = None;
+            app_notice_clear(a, NoticeKey::Zotero);
+            let msg = "Couldn't import PDF into Grimoire.";
+            crate::library::library_zotero_set_status(a, msg);
+            crate::editor::editor_zotero_set_status(a, msg);
+            app_toast(a, msg, 5000);
+        }
+    }
+}
+
+fn zotero_import_end(a: &mut App, id: &str, fin: crate::pdfimport::Finished) {
+    use crate::pdfimport::Finished;
+    if fin == Finished::Nothing {
+        return;
+    }
+    let ended_nb = crate::pdfimport::ended_notebook(id, &fin);
+    let Some(pending) = a.zotero_import.take() else {
+        pdf_import_told(a, id, fin);
+        return;
+    };
+    app_notice_clear(a, NoticeKey::Zotero);
+    if crate::pdfimport::pending_count() == 0 && !crate::pdfimport::detached_running() {
+        app_notice_clear(a, NoticeKey::Import);
+        crate::pdfimport::notice_set(false);
+    }
+
+    match fin {
+        Finished::Nothing => {}
+        Finished::Failed(_) => {
+            crate::library::library_zotero_set_status(a, "Couldn't import PDF.");
+            crate::editor::editor_zotero_set_status(a, "Couldn't import PDF.");
+            pdf_import_told(a, id, fin);
+        }
+        Finished::Imported { .. } | Finished::Already | Finished::Filled { .. } => {
+            let Some(nb_id) = ended_nb
+                .filter(|s| !s.is_empty())
+                .or_else(|| (!id.is_empty()).then(|| id.to_string()))
+            else {
+                let msg = "Couldn't locate imported Zotero notebook.";
+                crate::library::library_zotero_set_status(a, msg);
+                crate::editor::editor_zotero_set_status(a, msg);
+                app_toast(a, msg, 5000);
+                return;
+            };
+            if matches!(fin, Finished::Imported { .. }) {
+                let _ = import_made(a, &nb_id);
+            }
+            if let ZoteroImportPhase::Importing { info, .. } = pending.phase {
+                let item_key = if !pending.item.item_key.is_empty() {
+                    pending.item.item_key.clone()
+                } else {
+                    info.parent_item_key.clone()
+                };
+                let attachment_key = if !info.attachment_key.is_empty() {
+                    info.attachment_key.clone()
+                } else {
+                    pending.item.attachment_key.clone()
+                };
+                let pdf_local_path = if !info.local_path.is_empty() {
+                    info.local_path.clone()
+                } else {
+                    pending.item.pdf_local_path.clone()
+                };
+                let sidecar = crate::zotero_sync::ZoteroNotebookSource {
+                    schema_version: crate::zotero_bridge::SCHEMA_VERSION as u32,
+                    item_key,
+                    attachment_key,
+                    citation_key: pending.item.citation_key.clone(),
+                    title: pending.item.title.clone(),
+                    authors: pending.item.authors.clone(),
+                    year: pending.item.year.clone(),
+                    pdf_local_path,
+                    page_count: info.pages.len() as u32,
+                    pages: info.pages,
+                };
+                if let Err(e) = crate::zotero_sync::zotero_source_save(&nb_id, &sidecar) {
+                    qlog!("zotero: could not write zotero_source.json for %s: %s", &nb_id, &e);
+                }
+            }
+            open_zotero_notebook(a, &nb_id, pending.page);
+        }
+    }
+}
+
+/// Unified Zotero item open entry point (Library `ZoteroView` & Editor `ZoteroSheet`):
+/// - Non-PDF attachments (EPUB, Web Snapshot, metadata-only) fall back cleanly to Zotero via exit-42 handoff.
+/// - Already-bound PDF attachments (`find_notebook_by_attachment_key`) reopen the existing Grimoire notebook
+///   directly (preserving `last_page` when `page == 0`, or jumping to 1-based `page` when specified).
+/// - Unbound PDF attachments inspect/fetch via background `zk-sync pdf-info` (`--fetch` when uncached),
+///   import through Grimoire's multi-page `pdfimport` pipeline, bind `zotero_source.json`, and open in Editor.
+pub fn zotero_open_item(
+    a: &mut App,
+    item: &crate::zotero_bridge::ZoteroLibraryItem,
+    page: u32,
+    return_to: Option<crate::zotero_bridge::ReturnPlace>,
+) {
+    if !item.has_pdf || item.attachment_key.is_empty() {
+        if crate::zotero_bridge::app_request_zotero_handoff(
+            a,
+            &item.item_key,
+            &item.attachment_key,
+            page,
+            "",
+            return_to,
+        ) != 0
+        {
+            app_toast(a, "Couldn't hand off to Zotero.", 3000);
+        }
+        return;
+    }
+
+    if let Some(nb_id) = crate::zotero_sync::find_notebook_by_attachment_key(&item.attachment_key) {
+        open_zotero_notebook(a, &nb_id, page);
+        return;
+    }
+
+    if crate::zotero_sync::zk_bg_busy() || a.zotero_import.is_some() {
+        return;
+    }
+
+    if crate::zotero_sync::zk_sync_available() {
+        let fetch = !crate::zotero_sync::zotero_pdf_on_disk(item);
+        if crate::zotero_sync::zk_bg_start_pdf_info(item.clone(), fetch) {
+            let st = if fetch {
+                "Downloading PDF from Zotero..."
+            } else {
+                "Checking PDF..."
+            };
+            a.zotero_import = Some(ZoteroPendingImport {
+                item: item.clone(),
+                page,
+                return_to,
+                phase: ZoteroImportPhase::FetchingInfo {
+                    fetch_attempted: fetch,
+                },
+            });
+            app_notice(a, NoticeKey::Zotero, st);
+            crate::library::library_zotero_set_status(a, st);
+            crate::editor::editor_zotero_set_status(a, st);
+        } else {
+            app_toast(a, "Couldn't start Zotero PDF check.", 3000);
+        }
+        return;
+    }
+
+    if crate::zotero_sync::zotero_pdf_on_disk(item) {
+        let filename = std::path::Path::new(&item.pdf_local_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document.pdf")
+            .to_string();
+        let fallback_info = crate::zotero_sync::ZkPdfInfo {
+            schema_version: crate::zotero_bridge::SCHEMA_VERSION as u32,
+            attachment_key: item.attachment_key.clone(),
+            parent_item_key: item.item_key.clone(),
+            filename,
+            cached: true,
+            fetched: false,
+            local_path: item.pdf_local_path.clone(),
+            page_count: 0,
+            pages: Vec::new(),
+        };
+        zotero_begin_pdf_import(a, item.clone(), page, return_to, fallback_info);
+    } else if crate::zotero_bridge::app_request_zotero_handoff(
+        a,
+        &item.item_key,
+        &item.attachment_key,
+        page,
+        "",
+        return_to,
+    ) != 0
+    {
+        app_toast(a, "PDF is not cached locally.", 4000);
+    }
+}
+
+fn zotero_tick(a: &mut App) {
+    use crate::zotero_sync::ZkBgDone;
+    let Some(done) = crate::zotero_sync::zk_bg_poll() else {
+        return;
+    };
+    match done {
+        ZkBgDone::Refresh(res) => {
+            let was_sync = crate::zotero_sync::zk_bg_last_refresh_was_sync();
+            app_notice_clear(a, NoticeKey::Zotero);
+            match res {
+                Ok(idx) => {
+                    let msg = if was_sync {
+                        let n = idx.items.len();
+                        Some(format!(
+                            "Synced {n} item{} in Zotero catalog.",
+                            if n == 1 { "" } else { "s" }
+                        ))
+                    } else {
+                        None
+                    };
+                    crate::library::library_zotero_on_refresh(a, msg.as_deref());
+                    crate::editor::editor_zotero_on_refresh(a, msg.as_deref());
+                }
+                Err(err) => {
+                    let clean = crate::zotero_sync::scrub_error_message(&err.message());
+                    let msg = if clean.is_empty() {
+                        "Zotero sync failed.".to_string()
+                    } else {
+                        clean
+                    };
+                    crate::library::library_zotero_on_refresh(a, Some(&msg));
+                    crate::editor::editor_zotero_on_refresh(a, Some(&msg));
+                    app_toast(a, &msg, 5000);
+                }
+            }
+        }
+        ZkBgDone::PdfInfo { item, result } => {
+            let pending = a.zotero_import.take();
+            let (page, return_to, fetch_attempted) = match pending {
+                Some(ZoteroPendingImport {
+                    page,
+                    return_to,
+                    phase: ZoteroImportPhase::FetchingInfo { fetch_attempted },
+                    ..
+                }) => (page, return_to, fetch_attempted),
+                Some(other) => {
+                    a.zotero_import = Some(other);
+                    (0, None, true)
+                }
+                None => (0, None, true),
+            };
+            match result {
+                Err(err) => {
+                    app_notice_clear(a, NoticeKey::Zotero);
+                    let clean = crate::zotero_sync::scrub_error_message(&err.message());
+                    let msg = if clean.is_empty() {
+                        "Couldn't fetch PDF from Zotero.".to_string()
+                    } else {
+                        clean
+                    };
+                    crate::library::library_zotero_set_status(a, &msg);
+                    crate::editor::editor_zotero_set_status(a, &msg);
+                    app_toast(a, &msg, 6000);
+                }
+                Ok(info) => {
+                    if !info.cached {
+                        if !fetch_attempted
+                            && crate::zotero_sync::zk_sync_available()
+                            && crate::zotero_sync::zk_bg_start_pdf_info(item.clone(), true)
+                        {
+                            let st = "Downloading PDF from Zotero...";
+                            a.zotero_import = Some(ZoteroPendingImport {
+                                item,
+                                page,
+                                return_to,
+                                phase: ZoteroImportPhase::FetchingInfo {
+                                    fetch_attempted: true,
+                                },
+                            });
+                            app_notice(a, NoticeKey::Zotero, st);
+                            crate::library::library_zotero_set_status(a, st);
+                            crate::editor::editor_zotero_set_status(a, st);
+                        } else {
+                            app_notice_clear(a, NoticeKey::Zotero);
+                            let msg = "PDF is not cached locally.";
+                            crate::library::library_zotero_set_status(a, msg);
+                            crate::editor::editor_zotero_set_status(a, msg);
+                            app_toast(a, msg, 5000);
+                        }
+                    } else {
+                        zotero_begin_pdf_import(a, item, page, return_to, info);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // The staying notice of an import (the Library's: "Importing: page 37 of 412"), from the shared progress record
 // the writer fills, or from the coarse progress in import/.marks while a previous run's detached child imports.
 // Also: imports the job queue no longer knows are let go of (M11), and the end of a previous run's detached
@@ -2182,7 +2596,12 @@ fn pdf_import_tick(a: &mut App, now: u32) {
     // by path) writes no notebook itself: a fill goes in during it by these same rules, and the one of its own PDF
     // ends it.
     let book = book_pdf_src();
-    let free = a.scr == ScreenId::Library && !a.asleep && !book_holds(a) && crate::library::library_at_rest(a);
+    let zot_src = zotero_import_src(a);
+    let free = a.scr == ScreenId::Library
+        && !a.asleep
+        && !book_holds(a)
+        && (crate::library::library_at_rest(a)
+            || (zot_src.is_some() && crate::library::library_zotero_modal_up(a)));
     let fin = crate::pdfimport::fill_tick(free, a.dpi);
     if let Some((done, total)) = crate::pdfimport::fill_busy() {
         let mut msg = String::new();
@@ -2193,6 +2612,11 @@ fn pdf_import_tick(a: &mut App, now: u32) {
     }
     if fin != crate::pdfimport::Finished::Nothing && book.is_some() && crate::pdfimport::fill_told_src() == book {
         book_pdf_end("", fin);
+    } else if fin != crate::pdfimport::Finished::Nothing
+        && zot_src.is_some()
+        && crate::pdfimport::fill_told_src() == zot_src
+    {
+        zotero_import_end(a, "", fin);
     } else {
         pdf_import_told(a, "", fin);
     }
@@ -2235,6 +2659,8 @@ fn poll_jobs(a: &mut App) -> i32 {
         let fin = crate::pdfimport::finished(done_id.as_str(), r > 0);
         if src.is_some() && src == book_pdf_src() {
             book_pdf_end(done_id.as_str(), fin);
+        } else if zotero_import_matches(a, done_id.as_str(), src.as_deref()) {
+            zotero_import_end(a, done_id.as_str(), fin);
         } else {
             pdf_import_told(a, done_id.as_str(), fin);
         }
@@ -2365,6 +2791,7 @@ fn app_tick_screens(a: &mut App, now: u32) {
         }
     }
     wifi_tick();
+    zotero_tick(a);
     book_tick(a);
     pdf_import_tick(a, now);
     let bg = poll_jobs(a);
