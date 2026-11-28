@@ -1198,7 +1198,8 @@ fn preview_fold(a: &mut App, t: u32, show: bool) {
                 }
                 let st = &p.strokes[i];
                 rects.push(halo_rect(s, st));
-                let w = (2.0 * mm_to_px(st.params.size_max_mm.max(0.1), dpi) * zoom) as i64 + 2 * halo as i64;
+                // (the width as the brush takes it: a resized stroke's may be past 12 mm in memory, lasso_scale_widths)
+                let w = (2.0 * mm_to_px(st.params.size_max_mm.max(0.1).min(12.0), dpi) * zoom) as i64 + 2 * halo as i64;
                 area += ((stroke_length(st) * zoom) as i64 + w) * w;
             }
             Some((rects, area))
@@ -1358,7 +1359,8 @@ pub(super) fn sel_draw_halo(a: &mut App, r: Rect) {
             (Some(v), shown) => {
                 let run_at: Option<HashMap<(u32, u32), usize>> = shown.map(|runs| runs.iter().enumerate().flat_map(|(r, run)| run.iter().map(move |q| ((q.0.to_bits(), q.1.to_bits()), r))).collect());
                 let run = |x: f32, y: f32| run_at.as_ref().map_or(Some(0), |m| m.get(&(x.to_bits(), y.to_bits())).copied());
-                let ink = 2.0 * mm_to_px(st.params.size_max_mm.max(0.1), dpi) * 0.5 * zoom;
+                // (the width as the brush takes it: a resized stroke's may be past 12 mm in memory)
+                let ink = 2.0 * mm_to_px(st.params.size_max_mm.max(0.1).min(12.0), dpi) * 0.5 * zoom;
                 let t = ink.round() as i32 + 2 * halo;
                 let mut cur: Vec<(f32, f32, i32)> = Vec::new();
                 for k in 0..v.len() {
@@ -1531,10 +1533,7 @@ fn halo_shown<'x>(s: &EditorState, p: &Page, items: impl Iterator<Item = (&'x St
             continue;
         }
         let (floors, erasers, drawn) = judging.get_or_insert_with(|| (page_floors(p), page_erasers(p), drawn_page(s)));
-        let v = match drawn {
-            Some(d) => stroke_shown_runs(p, floors.as_deref(), st, i, dpi, erasers, d),
-            None => stroke_visible_runs(p, floors.as_deref(), st, i, dpi, erasers),
-        };
+        let v = shown_of(p, floors.as_deref(), st, i, dpi, erasers, drawn.as_ref());
         if keep {
             s.sel.halo_found.set(s.sel.halo_found.get().wrapping_add(1));
         }
@@ -1545,6 +1544,44 @@ fn halo_shown<'x>(s: &EditorState, p: &Page, items: impl Iterator<Item = (&'x St
         }
     }
     out
+}
+
+/// What shows of stroke st, standing at index i of the open page p, as the halo finds it: as the page draws it
+/// (stroke_shown_runs) when `drawn` holds the page, else the estimate (stroke_visible_runs).
+fn shown_of(p: &Page, f: Option<&FloorTable>, st: &Stroke, i: usize, dpi: f32, erasers: &Erasers, drawn: Option<&Drawn>) -> Option<VisibleRuns> {
+    match drawn {
+        Some(d) => stroke_shown_runs(p, f, st, i, dpi, erasers, d),
+        None => stroke_visible_runs(p, f, st, i, dpi, erasers),
+    }
+}
+
+/// Whether the page shows any of the ink plan takes (its strokes taken whole and its pieces inside the lasso), by
+/// the halo's rule (halo_shown): would the selection it makes have a halo anywhere (issue #205). What sel.visible
+/// holds for the page as it is (the preview's) is taken first, the rest found, the first that shows ending it;
+/// nothing found is kept.
+fn plan_shows(s: &EditorState, plan: &CutPlan, dpi: f32) -> bool {
+    let Some(p) = s.open_page() else { return true };
+    let whole = plan.whole.iter().map(|&i| (&*p.strokes[i], i));
+    let pieces = plan.cut.iter().flat_map(|(i, v)| v.iter().filter(|q| q.1).map(move |q| (&*q.0, *i)));
+    let items: Vec<(&Stroke, usize)> = whole.chain(pieces).collect();
+    let shows = |v: &Option<VisibleRuns>| v.as_ref().is_none_or(|r| !r.is_empty());
+    let current = s.sel.visible_key.get() == visible_key(p);
+    let kept = s.sel.visible.borrow();
+    let known = |st: &Stroke| if current { kept.get(&stroke_id(st)) } else { None };
+    if items.iter().any(|(st, _)| known(st).is_some_and(shows)) {
+        return true;
+    }
+    let mut judging: Option<(Option<Box<FloorTable>>, Erasers, Option<Drawn>)> = None;
+    for (st, i) in items {
+        if known(st).is_some() {
+            continue;
+        }
+        let (floors, erasers, drawn) = judging.get_or_insert_with(|| (page_floors(p), page_erasers(p), drawn_page(s)));
+        if shows(&shown_of(p, floors.as_deref(), st, i, dpi, erasers, drawn.as_ref())) {
+            return true;
+        }
+    }
+    false
 }
 
 /// What shows of stroke st for its halo: from sel.visible's entries (`kept`) or from what halo_shown returned
@@ -1602,10 +1639,16 @@ fn lasso_done(a: &mut App) {
         qlog!("lasso: preview batches=%d made=%d tests=%u erased=%u reused=%d", lv.batches as i32, lv.made as i32, lv.tests.min(u32::MAX as u64) as u32, lv.hide_tests().min(u32::MAX as u64) as u32, reused as i32);
     }
     let erasure_there = picked.as_ref().is_some_and(|p| p.1);
-    let Some((plan, _)) = picked.filter(|(plan, _)| !plan.is_empty()) else {
+    // ink the page shows nothing of, alone in what the lasso took (no link or Zotero citation with it): nothing to select, as round
+    // empty paper (issue #205); beside ink that shows it is taken as before, and Copy, Cut and Delete carry it
+    let unseen = picked.as_ref().is_some_and(|(plan, _)| !plan.is_empty() && plan.links.is_empty() && plan.zlinks.is_empty() && !plan_shows(ed_ref(a), plan, dpi));
+    if unseen {
+        qlog!("lasso: only ink the page shows nothing of: nothing selected");
+    }
+    let Some((plan, _)) = picked.filter(|(plan, _)| !plan.is_empty() && !unseen) else {
         ed(a).sel.lift_rect = drawn;
         redraw(a, drawn, RefreshMode::Ui);
-        if erasure_there {
+        if erasure_there && !unseen {
             // TRANSLATORS: a toast (about 1700 px at 44 px in bold, or two lines): a lasso in Select mode went
             // around only white ink or eraser marks, which are not objects: they move with the ink they cover.
             app_toast(a, tr("Nothing to select: white ink and eraser marks move with the ink under them."), 3500);
@@ -1705,6 +1748,7 @@ fn sel_mode_toggle(a: &mut App) {
     let now = !exact_mode();
     EXACT.store(now, std::sync::atomic::Ordering::Relaxed);
     let before = overlay_rect(a);
+    halo_paper(a); // (what shows of the ink judged again is found as the halo finds it)
     let s = ed(a);
     s.sel.exact = now;
     if s.sel.state == SelState::Selected && !s.sel.kept.is_empty() && sel_indices(s).is_some() {
@@ -1716,7 +1760,8 @@ fn sel_mode_toggle(a: &mut App) {
             (Some(l), Some(p)) => Some(judge(p, &page_links, &page_zlinks, &l, lasso_enclosed(p, &l, dpi), now, dpi)),
             _ => None,
         };
-        match plan.filter(|pl| !pl.is_empty()) {
+        // (only ink the page shows nothing of, as in lasso_done: nothing, issue #205)
+        match plan.filter(|pl| !pl.is_empty() && (!pl.links.is_empty() || !pl.zlinks.is_empty() || plan_shows(s, pl, dpi))) {
             Some(plan) => {
                 let (n, ncut) = (plan.taken(), plan.cut.len());
                 sel_take(s, plan, &page_links, &page_zlinks, pts);
@@ -2356,8 +2401,8 @@ fn sel_move(a: &mut App, dx: i32, dy: i32) {
 }
 
 /// The resize released: the selection scaled from box `from` to `to` about the corner opposite `handle`,
-/// one undo step (the ink off its place, the group scaled and put at the end of the page with its erasing,
-/// carried link areas scaled).
+/// one undo step (the ink off its place, the group scaled, its widths with its points, and put at the end of
+/// the page with its erasing, carried link areas scaled).
 fn sel_scale(a: &mut App, from: Rect, to: Rect, handle: i32) {
     if from.w <= 0 || from.h <= 0 || to.w <= 0 || to.h <= 0 {
         return;
@@ -2462,7 +2507,9 @@ fn sel_place(a: &mut App, spot: Spot) {
     let sp = splice_plan(s, ip, &idx);
     let idx: Vec<usize> = sp.as_ref().map_or(idx, |sp| sp.sel.clone());
     let page = s.hist[ip].page.as_deref().unwrap();
-    let g = lasso_lift_with_zlinks(page, &idx, carried.clone(), carried_z.clone(), dpi);
+    let mut g = lasso_lift_with_zlinks(page, &idx, carried.clone(), carried_z.clone(), dpi);
+    // a resize (a move's spot has scale 1): the widths scale with the points, its erasing's too (issue #204)
+    lasso_scale_widths(&mut g, spot.scale);
     let src_seeds = staying_link_seeds(s, pid, &carried);
     // take the selection off
     let page = s.hist[ip].page.as_deref_mut().unwrap();
@@ -2870,7 +2917,8 @@ fn finger_lift(a: &mut App) {
 }
 
 /// Paste: the clipboard's group at the end of the open page (where it was if that spot is in view, else
-/// in the middle of the view; centred on `at`, a long press), selected, one step with its links.
+/// in the middle of the view; centred on `at`, a long press; scaled down, widths too, only to fit a smaller
+/// page), selected, one step with its links.
 pub(super) fn sel_paste(a: &mut App, at: Option<(i32, i32)>) {
     let dpi = a.dpi;
     if refuse_readonly(a) {
@@ -2895,6 +2943,9 @@ pub(super) fn sel_paste(a: &mut App, at: Option<(i32, i32)>) {
     let page = s.hist[ip].page.as_deref().unwrap();
     let dst_links: Vec<NavLink> = s.nav.links.iter().filter(|l| l.pid == pid).copied().collect();
     let mut gl = g.clone();
+    // scaled down to fit this page (a group larger than it): its widths with its points, as a resize scales
+    // them (spot.scale is 1 for a paste that fits: no change)
+    lasso_scale_widths(&mut gl, spot.scale);
     let mut index_left = false;
     if g.src_nb != here {
         gl.links.retain(|l| {
@@ -3065,8 +3116,8 @@ pub(super) fn sel_probe(a: &App, key: &str) -> Option<String> {
         // exact area: the selection's (or the next lasso's) mode, and how many strokes its plan cuts
         "sel_exact" => (if matches!(s.sel.state, SelState::Off | SelState::Armed) { exact_mode() } else { s.sel.exact } as i32).to_string(),
         "sel_cut" => s.sel.plan.len().to_string(),
-        // the open page's strokes, hashed (tool, seed, ext, every point): "page_sig_keep" keeps it (and says
-        // "kept"), "page_sig_same" says 1 while it is the one kept (an exact-area Copy leaves the page so)
+        // the open page's strokes, hashed (tool, seed, ext, parameters, every point): "page_sig_keep" keeps it
+        // (and says "kept"), "page_sig_same" says 1 while it is the one kept (an exact-area Copy leaves the page so)
         "page_sig_keep" => {
             PAGE_SIG.with(|c| c.set(page_sig(s)));
             "kept".to_string()
@@ -3149,6 +3200,10 @@ fn page_sig(s: &EditorState) -> u64 {
             eat(st.tool.0 as u32);
             eat(st.seed);
             eat(u32::from_le_bytes([st.ext[0], st.ext[1], st.ext[2], 0]));
+            // (its parameters too: a resize scales the widths, issue #204)
+            for k in 0..ToolParams::COUNT {
+                eat(st.params.get(k).to_bits());
+            }
             for q in &st.pts {
                 eat(q.x.to_bits());
                 eat(q.y.to_bits());

@@ -3979,9 +3979,7 @@ fn draw_widgets(a: &mut App, r: Rect) {
 }
 
 fn widget_body(f: &WidgetFrame) -> Rect {
-    let r = f.rect();
-    let title = f.title_rect();
-    Rect { x: r.x + ui_px(14.0), y: title.y + title.h + ui_px(8.0), w: r.w - ui_px(28.0), h: r.h - title.h - ui_px(22.0) }
+    f.body_rect()
 }
 
 fn draw_widget_frame(a: &mut App, i: usize) {
@@ -4015,14 +4013,8 @@ fn draw_widget_frame(a: &mut App, i: usize) {
         if let Some(rt) = f.runtime.as_mut() {
             rt.draw(c, body);
         }
-        if let Some(err) = f.error() {
-            let mut text = format!("{}\nv{}", f.def.name, f.def.version);
-            if !f.def.author.is_empty() {
-                text.push_str(&format!(" · {}", f.def.author));
-            }
-            text.push('\n');
-            text.push_str(err);
-            ui_text(c, FontFace::Regular, ui_small_size(), ui_small_size(), body, &text, 6, false, 0);
+        if let Some((reason, whose)) = f.says() {
+            draw_widget_says(c, body, &reason, &whose);
         } else if f.runtime.is_none() {
             let mut text = f.def.name.to_string();
             if !f.def.version.is_empty() {
@@ -4041,6 +4033,24 @@ fn draw_widget_frame(a: &mut App, i: usize) {
         let gr = f.resize_rect();
         ui_icon(c, IconKind::Expand, Rect::new(gr.x + ui_px(18.0), gr.y + ui_px(18.0), gr.w - ui_px(36.0), gr.h - ui_px(36.0)), 150);
     }
+}
+
+/// What a frame whose module failed says in its body (`WidgetFrame::says`): the reason first, in as many lines as
+/// it needs and the body holds, so that a small body shows it; under it, where lines are left, whose widget it is.
+/// Nothing of either leaves the body.
+pub fn draw_widget_says(c: &mut Canvas, body: Rect, reason: &str, whose: &str) {
+    let px = ui_small_size();
+    let lh = (font_ascent(FontFace::Regular, px) + font_descent(FontFace::Regular, px)).max(1);
+    let room = (body.h / lh).clamp(1, 6);
+    let lines = font_wrap_lines(FontFace::Regular, px, reason, body.w, None).clamp(1, room);
+    let clip = c.clip;
+    canvas_set_clip(c, rect_intersect(clip, body));
+    ui_text(c, FontFace::Regular, px, px, Rect { x: body.x, y: body.y, w: body.w, h: lines * lh }, reason, lines, false, 0);
+    if room > lines {
+        let under = (room - lines).min(2);
+        ui_text(c, FontFace::Regular, px, px, Rect { x: body.x, y: body.y + lines * lh, w: body.w, h: under * lh }, whose, under, false, 0);
+    }
+    c.clip = clip;
 }
 
 fn draw_shape_menu(a: &mut App) {
@@ -9952,21 +9962,30 @@ fn widget_tick(a: &mut App, now: u32) {
     }
 }
 
-/// editor_tick: an open package that asked for a later draw (a clock, a countdown) has its frame
-/// refreshed then; a package that never asks is only drawn when something else repaints it.
-fn widget_runtime_tick(a: &mut App) {
+/// editor_tick: an open frame whose module asked for a later drawing pass (a clock, a countdown) is drawn
+/// again when the pass is due, and its rectangle is refreshed once; a module that never asks is only drawn
+/// when something else repaints it. A minimized frame draws no body, so its request waits until the frame is
+/// restored (which draws it). While nothing is due, nothing is drawn and nothing is refreshed.
+///
+/// A pass that is due waits while the pen is near, a stroke or another gesture is in progress, or the driver
+/// is in pen mode: the clock corner's rule (`status_busy`), since the pass's grayscale refresh would end pen
+/// mode and wait for the pen's last frame. The request stays with the frame's runtime meanwhile, so the one
+/// pass and its one refresh come when the pen has left. A tap on a frame is not this path: `widget_pointer`
+/// draws for it at the lift.
+fn widget_runtime_tick(a: &mut App, now: u32) {
     let s = ed_ref(a);
-    if !s.open || a.asleep || s.owner != Owner::None || s.peek.active || sheet_open(s) || crate::library::library_settings_active(a) {
+    if !s.open || a.asleep || s.owner != Owner::None || s.peek.active || sheet_open(s) || crate::library::library_settings_active(a) || status_busy(a) {
         return;
     }
-    let now = std::time::Instant::now();
     let mut dirty: Option<Rect> = None;
-    for f in &s.widgets.frames {
-        if f.runtime.as_ref().is_some_and(|r| r.redraw_due(now)) {
+    for f in &mut ed(a).widgets.frames {
+        // (the request is taken here: the pass below answers it, and the module asks again if it wants another)
+        if !f.layout.minimized && f.runtime.as_mut().is_some_and(|r| r.redraw_taken(now)) {
             dirty = Some(dirty.map_or(f.rect(), |r| rect_union(r, f.rect())));
         }
     }
     if let Some(r) = dirty {
+        compose(a, r);
         app_invalidate(a, r, RefreshMode::Ui);
     }
 }
@@ -14237,7 +14256,7 @@ pub fn editor_tick(a: &mut App, now: u32) {
     // A pen held still in Select mode: a paste there (select.rs).
     if ed(a).open {
         sel_tick(a, now);
-        widget_runtime_tick(a);
+        widget_runtime_tick(a, now);
         if ed_ref(a).owner == Owner::Widget {
             widget_tick(a, now);
         }
@@ -14692,6 +14711,7 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
             "text" => { csnprintf!(out, cap, "%s", f.runtime.as_ref().map_or(String::new(), WidgetRuntime::text).as_str()); }
             "hits" => { csnprintf!(out, cap, "%d", f.runtime.as_ref().map_or(0, |r| r.hit_count() as i32)); }
             "error" => { csnprintf!(out, cap, "%s", f.error().unwrap_or("")); }
+            "says" => { csnprintf!(out, cap, "%s", f.says().map_or(String::new(), |(reason, whose)| format!("{reason} | {whose}")).as_str()); }
             _ => return -1,
         }
         return 0;
@@ -15303,9 +15323,10 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
         csnprintf!(out, cap, "%s", match v { None => "none", Some(true) => "1", Some(false) => "0" });
     } else if key == "stroke_screen_mm" {
         // The newest stroke's widest, as the screen shows it at the zoom now (the precise eraser's
-        // keeps its setting at any zoom); empty with no stroke.
+        // keeps its setting at any zoom; a resized stroke's past 12 mm is drawn 12 mm wide); empty with no
+        // stroke.
         match if has_page { newest(s) } else { None } {
-            Some(x) => csnprintf!(out, cap, "%.2f", x.params.size_max_mm * s.zoom),
+            Some(x) => csnprintf!(out, cap, "%.2f", x.params.size_max_mm.max(0.1).min(12.0) * s.zoom),
             None => csnprintf!(out, cap, "%s", ""),
         };
     } else if key == "stroke_look" {

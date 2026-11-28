@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.2.0 (unreleased)
+## 2.2.0 (2026-11-26)
 
 - **A new Settings menu** (#115, nebuff). Settings opens as a menu of six groups, General, Display, Sleep & Clock,
   Pen, Controls and System, each row opening its own sheet.
@@ -143,11 +143,28 @@
   when to wait, when the storage is full, or when the page must be reloaded; otherwise "Not imported.". Share still
   has no password: anyone on your Wi-Fi can open its page while it is open, so only send, and only tap Import, when
   you expect it and the two codes are the same.
-- **No faint marks in a lasso selection** (#187). Selecting with the lasso no longer shows faint outlines where ink
-  was erased (on a page you copied from, or erased on after a paste): the dotted halo follows the ink as the page
-  shows it, whatever the eraser's size and however many strokes of it, and after a move or a resize too. The
-  lasso's work over much erased ink is several times quicker, so its line keeps up with the pen there (it could
-  cut straight across part of the way).
+- **No faint marks in a lasso selection** (#187, #204, #205). Selecting with the lasso no longer shows faint
+  outlines where ink was erased (on a page you copied from, or erased on after a paste): the dotted halo follows
+  the ink as the page shows it, whatever the eraser's size and however many strokes of it, and after a move or a
+  resize too. The lasso's work over much erased ink is several times quicker, so its line keeps up with the pen
+  there (it could cut straight across part of the way). A selection made larger or smaller by a corner now scales
+  the width of everything in it with its size, ink, white ink and erasing alike, so an erased word no longer comes
+  back as faint traces after Done; a selection pasted into a notebook of a smaller page size, scaled down to fit
+  it, is scaled the same way. A lasso round only ink you erased wholly selects nothing and says "Nothing to
+  select.", as a lasso round empty paper does.
+- **Widgets** (#200, #208, nebuff). Small tools in a frame over the notebook, such as a calculator: each is a
+  package installed from its repository in Settings > Packages > Widgets (Install from repository...), after a
+  screen that says whose it is and asks. The Widgets button in a notebook lists the installed ones; a frame is
+  dragged by its title bar, minimized, resized by its corner and closed, and comes back where it was. A package
+  draws only inside its frame and keeps state only if its manifest says so, it is fetched over https alone and
+  checked against its SHA-256 at the install and again each time it is loaded, and one call of it is held to
+  limits; a frame that asks to be drawn again waits while the pen is writing. docs/WIDGETS.md is the developer's
+  guide.
+- **Faster zoom in a notebook** (#216, #217, tibidibi). Zooming a page, by a pinch or with the pen, keeps up with
+  the hand: the preview while zooming is drawn in black and white and paced to the screen, and the page settles
+  to its full rendering at the lift.
+- **A smoother side panel** (#214, #215, tibidibi). The notebook's side panel moves in black and white while it
+  is dragged and lands without a flash.
 
 ## 2.1.0 (2026-11-13)
 
