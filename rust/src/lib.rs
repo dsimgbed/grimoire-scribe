@@ -98,6 +98,7 @@ pub mod pdflinks; // document links from any source: validation, seeds, fills, t
 pub mod weblinks; // weblinks.ini: a document's web links, shown as a card with a QR code (2.2, issue #174)
 pub mod zotero_bridge; // the Grimoire × Zotero bridge (docs/bridge-contract.md): handoff, inbox, zoterolinks.ini
 pub mod zotero_sync; // headless zk-sync runner, background worker, and zotero_source.json sidecar
+pub mod zotero_ink; // two-way Zotero ink sync: coordinates, reconciliation, ink_sync sidecar, highlight overlays
 pub mod zotero_sheet; // the editor's Zotero inbox/library sheet and its cited-reference badges
 pub mod zotero_view; // the Library screen's built-in Zotero catalog browser modal
 pub mod notebookpicker;
@@ -225,6 +226,7 @@ pub mod prelude {
     pub use crate::zotero_bridge::*;
     pub use crate::zotero_bridge::ZoteroReturnContext;
     pub use crate::zotero_sync::*;
+    pub use crate::zotero_ink::*;
     pub use crate::zotero_sheet::*;
     pub use crate::zotero_view::*;
     pub use crate::notebookpicker::*;

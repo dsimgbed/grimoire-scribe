@@ -1068,7 +1068,7 @@ pub struct ZoteroNotebookSource {
     pub pages: Vec<ZkPdfPageGeometry>,
 }
 
-fn notebook_dir_verified(nb_id: &str) -> Result<String, String> {
+pub(crate) fn notebook_dir_verified(nb_id: &str) -> Result<String, String> {
     if !notebook_id_valid(nb_id) {
         return Err("invalid notebook id".to_string());
     }
@@ -1190,7 +1190,7 @@ fn serialize_zotero_source(src: &ZoteroNotebookSource) -> Result<String, String>
     Ok(doc)
 }
 
-fn write_atomic_in_existing_dir(dir: &str, filename: &str, data: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic_in_existing_dir(dir: &str, filename: &str, data: &[u8]) -> Result<(), String> {
     let path = format!("{dir}/{filename}");
     if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err("refusing to overwrite symlink at target path".to_string());
