@@ -846,6 +846,12 @@ fn test_6_offline(a: &mut App, mock: &Mock) {
 // ---------------------------------------------------------------------------------------------
 
 fn test_7_bar_layout_and_screenshots(a: &mut App, mock: &Mock) {
+    // The sync toasts' arrows and dash must exist in every UI face (no tofu on the Scribe).
+    for face in [FontFace::Regular, FontFace::Bold, FontFace::Caps] {
+        for cp in [0x2191u32, 0x2193, 0x2014] {
+            assert!(font_has_glyph(face, cp), "{face:?} lacks U+{cp:04X} used by the Zotero sync toasts");
+        }
+    }
     let shot_dir = std::env::var_os("GRIMOIRE_PHASE4_SHOT_DIR").filter(|d| !d.is_empty()).map(PathBuf::from);
     if let Some(ref d) = shot_dir {
         std::fs::create_dir_all(d).unwrap();
