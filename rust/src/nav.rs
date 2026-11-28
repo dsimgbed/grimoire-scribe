@@ -336,9 +336,9 @@ pub(crate) fn link_parse(line: &[u8]) -> Option<(u32, u32, &str)> {
     if target.iter().any(|&c| !(b'!'..=b'~').contains(&c)) {
         return None;
     }
-    // Expanded targets are recognized only for notebook links; future unknown lines stay byte-exact.
+    // Expanded targets are recognized for notebook links and z: Zotero links; future unknown lines stay byte-exact.
     let text=std::str::from_utf8(target).ok()?;
-    if target.len()>=16 && nav_external_target(text).is_none(){return None;}
+    if target.len()>=16 && nav_external_target(text).is_none() && !crate::zotero_bridge::is_zotero_target(text){return None;}
     Some((pid, seed, text))
 }
 

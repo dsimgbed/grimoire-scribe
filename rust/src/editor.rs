@@ -1507,18 +1507,30 @@ fn zotero_bar_visible(a: &App) -> bool {
         })
 }
 
+fn zotero_bar_text_px(bh: i32) -> f32 {
+    ui_text_size().min((bh - 2 * ui_px(8.0)) as f32 * 0.6)
+}
+
+fn zotero_bar_back_need_w(bh: i32, label: &str) -> i32 {
+    let ts = zotero_bar_text_px(bh);
+    let pad = ui_px(24.0);
+    let icon_sz = ui_px(40.0);
+    let icon_gap = ui_px(10.0);
+    pad + icon_sz + icon_gap + font_measure(FontFace::Caps, ts, label) + pad
+}
+
 fn zotero_bar_back_label(a: &App, bh: i32) -> Option<String> {
     let s = a.ed.as_deref()?;
     let ret = a.zotero_return.as_ref()?;
     if ret.notebook_id.is_empty() || ret.notebook_id == s.nb.id.as_str() {
         return None;
     }
-    let max_w = ui_px(380.0);
+    let max_w = ui_px(500.0);
     let title = ret.notebook_title.trim();
     if title.is_empty() {
         return Some("Back".to_string());
     }
-    if ui_button_need_w(bh, IconKind::Back, title, ButtonStyle::Plain) <= max_w {
+    if zotero_bar_back_need_w(bh, title) <= max_w {
         return Some(title.to_string());
     }
     let chars: Vec<char> = title.chars().collect();
@@ -1527,7 +1539,7 @@ fn zotero_bar_back_label(a: &App, bh: i32) -> Option<String> {
         n -= 1;
         let prefix: String = chars[..n].iter().collect();
         let cand = format!("{}...", prefix.trim_end());
-        if ui_button_need_w(bh, IconKind::Back, &cand, ButtonStyle::Plain) <= max_w {
+        if zotero_bar_back_need_w(bh, &cand) <= max_w {
             return Some(cand);
         }
     }
@@ -1552,7 +1564,7 @@ fn zotero_bar_layout(a: &App) -> Option<(Rect, Rect, Rect, String, String)> {
 
     let (back_label, back_w) = match zotero_bar_back_label(a, bh) {
         Some(lbl) => {
-            let w = ui_button_need_w(bh, IconKind::Back, &lbl, ButtonStyle::Plain).clamp(ui_px(176.0), ui_px(390.0));
+            let w = zotero_bar_back_need_w(bh, &lbl).clamp(ui_px(196.0), ui_px(510.0));
             (lbl, w)
         }
         None => (String::new(), 0),
@@ -1666,7 +1678,29 @@ fn zotero_bar_draw(a: &mut App, dirty: Rect) {
     let c = &mut a.screen;
     if !rect_is_empty(back_rect) {
         let st = if pressed == 1 { ButtonStyle::Selected } else { ButtonStyle::Plain };
-        ui_button(c, back_rect, IconKind::Back, &back_lbl, st);
+        let fg: u8 = if st == ButtonStyle::Selected { 255 } else { 0 };
+        ui_button(c, back_rect, IconKind::None, "", st);
+        let pad = ui_px(20.0);
+        let icon_sz = ui_px(40.0);
+        let icon_gap = ui_px(10.0);
+        let ts = zotero_bar_text_px(back_rect.h);
+        let icon_r = Rect::new(
+            back_rect.x + pad,
+            back_rect.y + (back_rect.h - icon_sz) / 2,
+            icon_sz,
+            icon_sz,
+        );
+        ui_icon(c, IconKind::Back, icon_r, fg);
+        let text_x = icon_r.x + icon_r.w + icon_gap;
+        let text_w = (back_rect.x + back_rect.w - pad - text_x).max(ui_px(20.0));
+        font_draw_left_name(
+            c,
+            FontFace::Caps,
+            ts,
+            Rect::new(text_x, back_rect.y, text_w, back_rect.h),
+            &back_lbl,
+            fg,
+        );
     }
     if !rect_is_empty(cite_rect) {
         let st = if pressed == 2 { ButtonStyle::Selected } else { ButtonStyle::Plain };
