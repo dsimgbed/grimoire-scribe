@@ -76,6 +76,11 @@ name = "test_zotero_phase3"
 path = "tests/test_zotero_phase3.rs"
 harness = false
 
+[[test]]
+name = "test_zotero_ink_sync"
+path = "tests/test_zotero_ink_sync.rs"
+harness = false
+
 [dependencies]
 libc = "0.2"
 # Installed widgets are WebAssembly modules. wasmi is a pure-Rust interpreter, so it follows the
