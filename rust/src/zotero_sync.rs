@@ -916,6 +916,258 @@ pub fn zk_sync_pdf_info(attachment_key: &str, fetch: bool) -> Result<ZkPdfInfo, 
     })
 }
 
+// ---- Phase 4: two-way ink sync wrappers (`ink-pull`, `ink-upsert`, `push`) ----
+
+use crate::zotero_ink::{
+    apply_ink_sync, ink_sync_save, parse_ink_pull, parse_upsert_result, plan_ink_sync,
+    serialize_upsert_payload, InkSyncState, InkSyncSummary, LocalBucket, PageStamp, ZkInkPull,
+    ZkUpsertPayload, ZkUpsertResult,
+};
+
+pub const ZK_UPSERT_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+fn check_att_key(attachment_key: &str) -> Result<(), ZkSyncError> {
+    if valid_cli_attachment_key(attachment_key) {
+        Ok(())
+    } else {
+        Err(ZkSyncError::InvalidArgument("invalid attachment_key".to_string()))
+    }
+}
+
+fn checked_stdout(out: &CmdOutput, what: &str) -> Result<(), ZkSyncError> {
+    if out.code != 0 {
+        return Err(ZkSyncError::CommandFailed {
+            code: out.code,
+            message: combined_error_text(out),
+        });
+    }
+    if out.stdout.contains(&0) || std::str::from_utf8(&out.stdout).is_err() {
+        return Err(ZkSyncError::InvalidOutput(format!("{what} stdout is not valid UTF-8")));
+    }
+    Ok(())
+}
+
+/// `zk-sync ink-pull <key> [--local-only]`: ink + highlight annotations for an attachment.
+pub fn zk_sync_ink_pull(attachment_key: &str, local_only: bool) -> Result<ZkInkPull, ZkSyncError> {
+    check_att_key(attachment_key)?;
+    let cfg = zk_sync_config();
+    let out = if local_only {
+        run_zk_sync(&cfg, &["ink-pull", attachment_key, "--local-only"], cfg.local_timeout_ms)?
+    } else {
+        run_zk_sync(&cfg, &["ink-pull", attachment_key], cfg.network_timeout_ms)?
+    };
+    checked_stdout(&out, "ink-pull")?;
+    let pull = parse_ink_pull(&out.stdout)
+        .map_err(|e| ZkSyncError::InvalidOutput(scrub_error_message(&e)))?;
+    if pull.attachment_key != attachment_key {
+        return Err(ZkSyncError::InvalidOutput(
+            "mismatched or invalid attachment_key".to_string(),
+        ));
+    }
+    Ok(pull)
+}
+
+/// Removes the wrapped temp file on drop (every path).
+struct TempFileGuard(std::ffi::CString);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::unlink(self.0.as_ptr());
+        }
+    }
+}
+
+fn write_private_temp(data: &[u8]) -> Result<(TempFileGuard, String), ZkSyncError> {
+    let pid = std::process::id();
+    let nonce = crate::zotero_bridge::WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("grimoire-zk-ink-{pid}-{:x}{:x}.json", stamp, nonce));
+    let path_s = path.to_string_lossy().into_owned();
+    let cpath = std::ffi::CString::new(path_s.as_str())
+        .map_err(|_| ZkSyncError::InvalidArgument("invalid temp path".to_string()))?;
+    unsafe {
+        let fd = libc::open(
+            cpath.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        );
+        if fd < 0 {
+            return Err(ZkSyncError::Unavailable(format!(
+                "open temp file failed: {}",
+                strerror(errno())
+            )));
+        }
+        let guard = TempFileGuard(cpath);
+        let mut left = data;
+        while !left.is_empty() {
+            let n = libc::write(fd, left.as_ptr() as *const libc::c_void, left.len());
+            if n < 0 {
+                if errno() == libc::EINTR {
+                    continue;
+                }
+                let msg = format!("write temp file failed: {}", strerror(errno()));
+                libc::close(fd);
+                return Err(ZkSyncError::Unavailable(msg));
+            }
+            left = &left[n as usize..];
+        }
+        if libc::fsync(fd) != 0 {
+            let msg = format!("fsync temp file failed: {}", strerror(errno()));
+            libc::close(fd);
+            return Err(ZkSyncError::Unavailable(msg));
+        }
+        if libc::close(fd) != 0 {
+            return Err(ZkSyncError::Unavailable("close temp file failed".to_string()));
+        }
+        Ok((guard, path_s))
+    }
+}
+
+/// `zk-sync ink-upsert <key> <payload.json>`: write Grimoire-owned ink into the local Zotero DB.
+pub fn zk_sync_ink_upsert(
+    attachment_key: &str,
+    payload: &ZkUpsertPayload,
+) -> Result<ZkUpsertResult, ZkSyncError> {
+    check_att_key(attachment_key)?;
+    let json = serialize_upsert_payload(payload)
+        .map_err(|e| ZkSyncError::InvalidArgument(scrub_error_message(&e)))?;
+    if json.len() > ZK_UPSERT_MAX_BYTES {
+        return Err(ZkSyncError::InvalidArgument("ink payload too large".to_string()));
+    }
+    let (_guard, path) = write_private_temp(json.as_bytes())?;
+    let cfg = zk_sync_config();
+    let out = run_zk_sync(&cfg, &["ink-upsert", attachment_key, &path], cfg.local_timeout_ms)?;
+    checked_stdout(&out, "ink-upsert")?;
+    let res = parse_upsert_result(&out.stdout)
+        .map_err(|e| ZkSyncError::InvalidOutput(scrub_error_message(&e)))?;
+    if !res.attachment_key.is_empty() && res.attachment_key != attachment_key {
+        return Err(ZkSyncError::InvalidOutput(
+            "mismatched or invalid attachment_key".to_string(),
+        ));
+    }
+    Ok(res)
+}
+
+/// `zk-sync push`: send pending local changes to Zotero (plain-text output; exit 1 on failure).
+pub fn zk_sync_push() -> Result<(), ZkSyncError> {
+    let cfg = zk_sync_config();
+    let out = run_zk_sync(&cfg, &["push"], cfg.network_timeout_ms)?;
+    if out.code != 0 {
+        return Err(ZkSyncError::CommandFailed {
+            code: out.code,
+            message: combined_error_text(&out),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InkSyncJob {
+    pub nb_id: String,
+    pub attachment_key: String,
+    pub state: InkSyncState,
+    pub local: Vec<LocalBucket>,
+    pub fresh_stamps: Vec<PageStamp>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InkSyncOutcome {
+    pub nb_id: String,
+    pub state: InkSyncState,
+    pub summary: InkSyncSummary,
+    pub save_error: Option<String>,
+}
+
+fn ink_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Synchronous two-way ink sync: pull, plan, upsert, push, apply, persist state.
+pub fn run_ink_sync(job: InkSyncJob) -> Result<InkSyncOutcome, ZkSyncError> {
+    let att = job.attachment_key.as_str();
+    let mut offline = false;
+    let pull = match zk_sync_ink_pull(att, false) {
+        Ok(p) => p,
+        Err(e @ (ZkSyncError::InvalidArgument(_) | ZkSyncError::Unavailable(_))) => return Err(e),
+        Err(_) => {
+            offline = true;
+            zk_sync_ink_pull(att, true)?
+        }
+    };
+    let plan = plan_ink_sync(&job.state, &pull, &job.local);
+    let result = if !plan.payload.is_empty() {
+        Some(zk_sync_ink_upsert(att, &plan.payload)?)
+    } else {
+        None
+    };
+    let changed = result
+        .as_ref()
+        .is_some_and(|r| r.created + r.updated + r.deleted > 0);
+    let dirty = changed || pull.ink.iter().any(|i| i.dirty);
+    let mut pushed = false;
+    if dirty && !offline {
+        match zk_sync_push() {
+            Ok(()) => pushed = true,
+            Err(_) => offline = true,
+        }
+    }
+    let now = ink_now_ms();
+    let (mut st, mut summary) =
+        apply_ink_sync(&job.state, &pull, &plan, result.as_ref(), &job.local, now);
+    if pushed {
+        if let Ok(fresh) = zk_sync_ink_pull(att, true) {
+            for b in st.local.iter_mut() {
+                if let Some(f) = fresh.ink.iter().find(|f| f.key == b.key) {
+                    b.version = f.version;
+                }
+            }
+            for r in st.remote_ink.iter_mut() {
+                if let Some(f) = fresh.ink.iter().find(|f| f.key == r.key) {
+                    r.version = f.version;
+                }
+            }
+        }
+    }
+    // Page stamps: only trust a fresh stamp whose buckets were all actually synced or suppressed.
+    let mut stamps: Vec<PageStamp> = st
+        .page_stamps
+        .iter()
+        .filter(|s| !plan.stale_pages.contains(&s.page_id))
+        .cloned()
+        .collect();
+    for fs in &job.fresh_stamps {
+        let covered = fs.buckets.iter().all(|(bucket, hash, _, _, _)| {
+            st.local
+                .iter()
+                .any(|b| b.page_id == fs.page_id && &b.bucket == bucket && &b.hash == hash)
+                || st
+                    .suppressed
+                    .iter()
+                    .any(|s| s.page_id == fs.page_id && &s.bucket == bucket && &s.hash == hash)
+        });
+        stamps.retain(|s| s.page_id != fs.page_id);
+        if covered {
+            stamps.push(fs.clone());
+        }
+    }
+    st.page_stamps = stamps;
+    st.attachment_key = att.to_string();
+    st.schema_version = 1;
+    st.last_sync_ms = now;
+    summary.offline = offline;
+    summary.pushed = pushed;
+    let save_error = ink_sync_save(&job.nb_id, &st).err().map(|e| scrub_error_message(&e));
+    Ok(InkSyncOutcome { nb_id: job.nb_id, state: st, summary, save_error })
+}
+
 // ---- non-blocking single-flight background runner for UI ----
 
 #[derive(Clone, Debug)]
@@ -924,6 +1176,10 @@ pub enum ZkBgDone {
     PdfInfo {
         item: ZoteroLibraryItem,
         result: Result<ZkPdfInfo, ZkSyncError>,
+    },
+    InkSync {
+        nb_id: String,
+        result: Result<InkSyncOutcome, ZkSyncError>,
     },
 }
 
@@ -1014,6 +1270,32 @@ pub fn zk_bg_start_pdf_info(item: ZoteroLibraryItem, fetch: bool) -> bool {
             let att = item.attachment_key.clone();
             let res = zk_sync_pdf_info(&att, fetch);
             finish_bg(id, ZkBgDone::PdfInfo { item, result: res });
+        });
+    if spawned.is_err() {
+        if let Ok(mut g) = BG_STATE.lock() {
+            *g = None;
+        }
+        return false;
+    }
+    true
+}
+
+/// Start a single-flight background two-way ink sync. Returns `false` if another task is running.
+pub fn zk_bg_start_ink_sync(job: InkSyncJob) -> bool {
+    let id = BG_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    {
+        let Ok(mut g) = BG_STATE.lock() else { return false };
+        if matches!(*g, Some(ZkBgState::Running { .. })) {
+            return false;
+        }
+        *g = Some(ZkBgState::Running { id, status: "Syncing Zotero ink...".to_string() });
+    }
+    let spawned = std::thread::Builder::new()
+        .name("zk-bg-ink-sync".to_string())
+        .spawn(move || {
+            let nb_id = job.nb_id.clone();
+            let res = run_ink_sync(job);
+            finish_bg(id, ZkBgDone::InkSync { nb_id, result: res });
         });
     if spawned.is_err() {
         if let Ok(mut g) = BG_STATE.lock() {
@@ -1757,4 +2039,36 @@ pub fn zotero_pdf_storage_path(info: &ZkPdfInfo) -> Result<StoragePath, String> 
     fs.open_file(&sp, true)
         .map_err(|_| "Staged PDF could not be verified in storage.".to_string())?;
     Ok(sp)
+}
+
+#[cfg(test)]
+mod ink_tests {
+    use super::*;
+
+    #[test]
+    fn upsert_unlinks_temp_file_on_failure_and_success() {
+        let dir = std::env::temp_dir().join(format!("grimoire-zk-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let rec = dir.join("seen.txt");
+        let bin = dir.join("zk-sync");
+        // Records the payload path then exits 3 (failure path).
+        std::fs::write(&bin, format!("#!/bin/sh\necho \"$3\" > '{}'\nexit 3\n", rec.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        zk_sync_set_test_config(Some(ZkSyncConfig {
+            bin: bin.to_string_lossy().into_owned(),
+            zk_home: dir.to_string_lossy().into_owned(),
+            zk_config_dir: dir.to_string_lossy().into_owned(),
+            local_timeout_ms: 5000,
+            network_timeout_ms: 5000,
+        }));
+        let r = zk_sync_ink_upsert("ABCD1234", &ZkUpsertPayload::default());
+        zk_sync_set_test_config(None);
+        assert!(matches!(r, Err(ZkSyncError::CommandFailed { code: 3, .. })));
+        let seen = std::fs::read_to_string(&rec).unwrap();
+        let p = seen.trim();
+        assert!(p.contains("grimoire-zk-ink-"));
+        assert!(!std::path::Path::new(p).exists());
+        assert!(matches!(zk_sync_ink_pull("bad/key", true), Err(ZkSyncError::InvalidArgument(_))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -34,7 +34,13 @@ const BG_UI_DECODE_BUDGET: usize = 96 << 20;
 /// pixel from page coordinates. A missing or unreadable file draws white, is remembered (it is not
 /// read again until bgimage_forget or bgimage_retry_missing), and raises bgimage_take_missing's flag.
 /// The cache holds pictures by notebook and id: the same id in two notebooks is two pictures.
+/// A Zotero-bound PDF page then gets its read-only Zotero highlights and remote ink (zotero_ink.rs) over the
+/// picture: part of the page's paper, under every stroke, restored by erase strokes like the picture itself.
 pub fn bgimage_render(c: &mut Canvas, nb: &str, k: PaperKind, region: Rect) {
+    bgimage_render_picture(c, nb, k, region);
+    crate::zotero_ink::overlay_paint(c, nb, k, region);
+}
+fn bgimage_render_picture(c: &mut Canvas, nb: &str, k: PaperKind, region: Rect) {
     let r = rect_intersect(region, c.clip);
     if rect_is_empty(r) {
         return;

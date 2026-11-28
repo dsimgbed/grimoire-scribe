@@ -586,8 +586,14 @@ pub struct EditorState {
     zbar_rect: Rect,
     zbar_back: Rect,
     zbar_cite: Rect,
-    /// active press on the floating Zotero PDF bar: 0 = none, 1 = Back, 2 = Cite
+    /// the Sync ink button on the floating Zotero PDF bar (Phase 4)
+    zbar_sync: Rect,
+    /// active press on the floating Zotero PDF bar: 0 = none, 1 = Back, 2 = Cite, 4 = Sync
     zbar_pressed: u8,
+    /// Phase 4: the open Zotero-bound PDF's ink sync state (`zotero_ink_sync.json`), cached overlays come from it
+    zink: Option<crate::zotero_ink::InkSyncState>,
+    /// a background Sync ink (zk-sync ink-pull / ink-upsert / push) is running for this editor
+    zink_busy: bool,
     zbar_press: Press,
     /// Link to... (linkbar.rs in pick mode): where a new link goes, while its area waits (lm Pick)
     lt: LinkBar,
@@ -1493,6 +1499,230 @@ fn zotero_show(a: &mut App) {
     compose_all(a, RefreshMode::Ui);
 }
 
+// ---- Phase 4: two-way Zotero ink sync & read-only highlight / remote-ink overlays ----
+//
+// Grimoire's own strokes stay in the page file (100% official-format compatible); what Zotero has (highlights,
+// underlines, ink drawn in Zotero) is cached in zotero_ink_sync.json and painted as part of the page's paper by
+// bgimage_render -> zotero_ink::overlay_paint: under the pen strokes, never in Page.strokes, never uploaded.
+
+fn zotero_key_ok(k: &str) -> bool {
+    !k.is_empty() && k.len() <= 32 && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// The paper of every page of the open notebook: the open page's from memory, the others from their files'
+/// first bytes (store_page_paper, no strokes read).
+fn zotero_ink_papers(s: &EditorState) -> Vec<PaperKind> {
+    (0..s.nb.npages())
+        .map(|i| match s.open_page().filter(|_| i == s.index) {
+            Some(p) => p.paper,
+            None => store_page_paper(&s.nb, i),
+        })
+        .collect()
+}
+
+/// Register the open notebook's cached overlays (or clear them).
+fn zotero_ink_register(s: &EditorState) {
+    let (Some(src), Some(st)) = (s.zotero_src.as_ref(), s.zink.as_ref()) else {
+        crate::zotero_ink::overlay_clear();
+        return;
+    };
+    if st.remote_ink.is_empty() && st.remote_highlights.is_empty() {
+        crate::zotero_ink::overlay_clear();
+        return;
+    }
+    let papers = zotero_ink_papers(s);
+    let ov = crate::zotero_ink::build_page_overlays(st, src, &papers, s.pgw, s.pgh);
+    crate::zotero_ink::overlay_set(s.nb.id.as_str(), ov);
+}
+
+/// At notebook open: the cached zotero_ink_sync.json of a Zotero-bound PDF (no network, never blocks the open).
+fn zotero_ink_load_overlays(s: &mut EditorState) {
+    s.zink_busy = false;
+    s.zink = match s.zotero_src.as_ref() {
+        Some(src) => crate::zotero_ink::ink_sync_load(s.nb.id.as_str())
+            .filter(|st| st.attachment_key.is_empty() || st.attachment_key == src.attachment_key),
+        None => None,
+    };
+    zotero_ink_register(s);
+}
+
+/// The overlays changed: every drawing that may hold the old ones goes (kept drawings, the peeks' caches, the
+/// paper erase strokes restore toward) and the open page is drawn again.
+fn zotero_ink_redraw(a: &mut App) {
+    let Some(s) = a.ed.as_deref_mut() else { return };
+    if !s.open {
+        return;
+    }
+    for &pid in s.nb.page_ids.iter() {
+        store_retire_page_render(&s.nb, pid);
+    }
+    cache_free(s);
+    s.canvas_page = 0;
+    s.paper_stale = true;
+    if a.scr == ScreenId::Editor && !a.asleep && !ed_ref(a).page_canvas.px.is_empty() {
+        render_page_full(a);
+        compose_all(a, RefreshMode::Ui);
+    }
+}
+
+/// The job for a Sync ink: the open page saved, then every page that maps to a PDF page turned into Zotero ink
+/// buckets (a page whose file is unchanged since the last sync comes from the stamp cache, without reading it).
+fn zotero_ink_sync_job(a: &mut App) -> Result<crate::zotero_sync::InkSyncJob, String> {
+    if !zotero_ink_sync_enabled(a) {
+        return Err("Zotero ink sync is unavailable.".to_string());
+    }
+    if !save_page(a) {
+        return Err("Couldn't save the page.".to_string());
+    }
+    let dpi = a.dpi;
+    let s = ed_ref(a);
+    let Some(src) = s.zotero_src.clone() else { return Err("Not a Zotero PDF.".to_string()) };
+    let mut state = s.zink.clone().unwrap_or_default();
+    if !state.attachment_key.is_empty() && state.attachment_key != src.attachment_key {
+        state = Default::default();
+    }
+    let papers = zotero_ink_papers(s);
+    let page_count = src.page_count.max(src.pages.len() as u32);
+    let map = crate::zotero_ink::pdf_page_index_map(&papers, page_count);
+    let mut local = Vec::new();
+    let mut fresh = Vec::new();
+    let mut live: Vec<u32> = Vec::new();
+    for (i, pdf) in map.iter().enumerate() {
+        let Some(pi) = *pdf else { continue };
+        let Some(geom) = src.pages.iter().find(|g| g.page_index == pi) else { continue };
+        let Some(&pid) = s.nb.page_ids.get(i) else { continue };
+        live.push(pid);
+        let stamp = store_page_stamp(&s.nb, pid);
+        let buckets = if i as i32 == s.index {
+            match s.open_page() {
+                Some(p) => crate::zotero_ink::page_local_buckets(p, pid, pi, geom, dpi),
+                None => continue,
+            }
+        } else {
+            let Some(st) = stamp.as_deref() else { continue }; // no page file: a blank page, no ink
+            if let Some(ps) = state.page_stamps.iter().find(|ps| ps.page_id == pid && ps.stamp == st && ps.buckets.iter().all(|b| b.2 == pi)) {
+                local.extend(crate::zotero_ink::local_buckets_from_stamp(ps));
+                continue;
+            }
+            let mut out: Option<Box<Page>> = None;
+            if store_load_page_pumped(&s.nb, i as i32, s.pgw, s.pgh, &mut out) != 0 {
+                continue;
+            }
+            match out.as_deref() {
+                Some(p) => crate::zotero_ink::page_local_buckets(p, pid, pi, geom, dpi),
+                None => continue,
+            }
+        };
+        if let Some(st) = stamp {
+            fresh.push(crate::zotero_ink::PageStamp {
+                page_id: pid,
+                stamp: st,
+                buckets: buckets.iter().map(|b| (b.bucket.clone(), b.hash.clone(), b.page_index, b.width, b.color.clone())).collect(),
+            });
+        }
+        local.extend(buckets);
+    }
+    state.page_stamps.retain(|ps| live.contains(&ps.page_id));
+    Ok(crate::zotero_sync::InkSyncJob {
+        nb_id: s.nb.id.to_string(),
+        attachment_key: src.attachment_key.clone(),
+        state,
+        local,
+        fresh_stamps: fresh,
+    })
+}
+
+fn zotero_ink_bar_repaint(a: &mut App) {
+    if a.scr != ScreenId::Editor || a.asleep || !a.ed.as_deref().is_some_and(|s| s.open) {
+        return;
+    }
+    if let Some((bar, _, _, _, _, _)) = zotero_bar_layout_full(a) {
+        compose(a, bar);
+        app_invalidate(a, bar, RefreshMode::Ui);
+    }
+}
+
+/// Sync ink (the PDF bar's Sync, or a control): saves the page and starts the background sync; the pen is never held.
+pub(crate) fn zotero_ink_sync_start(a: &mut App) -> bool {
+    if a.ed.as_deref().is_some_and(|s| s.zink_busy) || crate::zotero_sync::zk_bg_busy() {
+        app_toast(a, "Zotero is busy. Try again in a moment.", 2500);
+        return false;
+    }
+    let job = match zotero_ink_sync_job(a) {
+        Ok(j) => j,
+        Err(msg) => {
+            app_toast(a, &msg, 3000);
+            return false;
+        }
+    };
+    if !crate::zotero_sync::zk_bg_start_ink_sync(job) {
+        app_toast(a, "Zotero is busy. Try again in a moment.", 2500);
+        return false;
+    }
+    ed(a).zink_busy = true;
+    app_notice(a, NoticeKey::Zotero, "Syncing Zotero ink...");
+    zotero_ink_bar_repaint(a);
+    true
+}
+
+/// Sync ink run to its end on this thread (tests and the `zotero.ink.sync_blocking` control).
+fn zotero_ink_sync_blocking(a: &mut App) -> bool {
+    let job = match zotero_ink_sync_job(a) {
+        Ok(j) => j,
+        Err(msg) => {
+            app_toast(a, &msg, 3000);
+            return false;
+        }
+    };
+    let nb_id = job.nb_id.clone();
+    let res = crate::zotero_sync::run_ink_sync(job);
+    let ok = res.is_ok();
+    editor_zotero_ink_sync_done(a, &nb_id, res);
+    ok
+}
+
+/// Phase 4: a Sync ink finished (background or blocking): adopt its state, repaint the overlays, say what it did.
+pub fn editor_zotero_ink_sync_done(
+    a: &mut App,
+    nb_id: &str,
+    result: Result<crate::zotero_sync::InkSyncOutcome, crate::zotero_sync::ZkSyncError>,
+) {
+    if let Some(s) = a.ed.as_deref_mut() {
+        s.zink_busy = false;
+    }
+    app_notice_clear(a, NoticeKey::Zotero);
+    let here = editor_has_open(a, nb_id) && ed_ref(a).zotero_src.is_some();
+    match result {
+        Ok(out) => {
+            let mut msg = crate::zotero_ink::summary_toast(&out.summary);
+            if let Some(e) = out.save_error.as_deref() {
+                qlog!("zotero: zotero_ink_sync.json not written for %s: %s", nb_id, &crate::zotero_sync::scrub_error_message(e));
+                msg.push_str(" (state not saved)");
+            }
+            if here {
+                let s = ed(a);
+                let changed = s.zink.as_ref().is_none_or(|old| {
+                    old.remote_ink != out.state.remote_ink || old.remote_highlights != out.state.remote_highlights
+                });
+                s.zink = Some(out.state);
+                if changed {
+                    zotero_ink_register(ed_ref(a));
+                    zotero_ink_redraw(a);
+                }
+            }
+            app_toast(a, &msg, 3000);
+        }
+        Err(e) => {
+            let m = crate::zotero_sync::scrub_error_message(&e.message());
+            qlog!("zotero: ink sync failed for %s: %s", nb_id, &m);
+            app_toast(a, &format!("Zotero sync failed: {m}"), 4000);
+        }
+    }
+    if here {
+        zotero_ink_bar_repaint(a);
+    }
+}
+
 // ---- Floating Zotero PDF bar (← Back + Cite p. N) ----
 
 fn zotero_bar_visible(a: &App) -> bool {
@@ -1546,9 +1776,26 @@ fn zotero_bar_back_label(a: &App, bh: i32) -> Option<String> {
     Some("Back".to_string())
 }
 
+/// The Sync ink button's labels (fixed width: the widest, so the bar never shifts while a sync runs).
+const ZBAR_SYNC_LABEL: &str = "Sync";
+const ZBAR_SYNCING_LABEL: &str = "Syncing...";
+
+/// Whether the open Zotero-bound PDF can sync ink (a valid attachment key and a zk-sync binary).
+fn zotero_ink_sync_enabled(a: &App) -> bool {
+    a.ed.as_deref().is_some_and(|s| {
+        s.zotero_src.as_ref().is_some_and(|src| zotero_key_ok(&src.attachment_key))
+    }) && crate::zotero_sync::zk_sync_available()
+}
+
 /// Compute overlap-free top-right geometry for the floating Zotero PDF bar:
 /// `Some((bar_rect, back_rect, cite_rect, back_label, cite_label))`.
 fn zotero_bar_layout(a: &App) -> Option<(Rect, Rect, Rect, String, String)> {
+    zotero_bar_layout_full(a).map(|(bar, back, cite, _sync, bl, cl)| (bar, back, cite, bl, cl))
+}
+
+/// zotero_bar_layout plus the Sync ink button (RECT_EMPTY when ink sync is unavailable):
+/// `Some((bar_rect, back_rect, cite_rect, sync_rect, back_label, cite_label))`.
+fn zotero_bar_layout_full(a: &App) -> Option<(Rect, Rect, Rect, Rect, String, String)> {
     if !zotero_bar_visible(a) {
         return None;
     }
@@ -1569,7 +1816,17 @@ fn zotero_bar_layout(a: &App) -> Option<(Rect, Rect, Rect, String, String)> {
         }
         None => (String::new(), 0),
     };
-    let total_w = if back_w > 0 { back_w + gap + cite_w } else { cite_w };
+    let sync_w = if zotero_ink_sync_enabled(a) {
+        ui_button_need_w(bh, IconKind::None, ZBAR_SYNCING_LABEL, ButtonStyle::Plain)
+            .max(ui_button_need_w(bh, IconKind::None, ZBAR_SYNC_LABEL, ButtonStyle::Plain))
+            .max(ui_px(150.0))
+    } else {
+        0
+    };
+    let mut total_w = if back_w > 0 { back_w + gap + cite_w } else { cite_w };
+    if sync_w > 0 {
+        total_w += gap + sync_w;
+    }
 
     let status_z = status_zone(a);
     let panel_z = if rect_is_empty(s.panel) { RECT_EMPTY } else { rect_inflate(s.panel, ui_px(8.0)) };
@@ -1634,12 +1891,17 @@ fn zotero_bar_layout(a: &App) -> Option<(Rect, Rect, Rect, String, String)> {
         cite_w,
         bh,
     );
-    Some((bar_rect, back_rect, cite_rect, back_label, cite_label))
+    let sync_rect = if sync_w > 0 {
+        Rect::new(cite_rect.x + cite_rect.w + gap, bar_rect.y, sync_w, bh)
+    } else {
+        RECT_EMPTY
+    };
+    Some((bar_rect, back_rect, cite_rect, sync_rect, back_label, cite_label))
 }
 
-/// Hit-test the floating Zotero PDF bar: 0 = miss, 1 = Back, 2 = Cite, 3 = gap inside bar.
+/// Hit-test the floating Zotero PDF bar: 0 = miss, 1 = Back, 2 = Cite, 3 = gap inside bar, 4 = Sync.
 fn zotero_bar_hit(a: &App, x: f32, y: f32) -> u8 {
-    let Some((bar_rect, back_rect, cite_rect, _, _)) = zotero_bar_layout(a) else {
+    let Some((bar_rect, back_rect, cite_rect, sync_rect, _, _)) = zotero_bar_layout_full(a) else {
         return 0;
     };
     let (ix, iy) = (x as i32, y as i32);
@@ -1647,6 +1909,8 @@ fn zotero_bar_hit(a: &App, x: f32, y: f32) -> u8 {
         1
     } else if !rect_is_empty(cite_rect) && rect_contains(cite_rect, ix, iy) {
         2
+    } else if !rect_is_empty(sync_rect) && rect_contains(sync_rect, ix, iy) {
+        4
     } else if !rect_is_empty(bar_rect) && rect_contains(bar_rect, ix, iy) {
         3
     } else {
@@ -1655,19 +1919,22 @@ fn zotero_bar_hit(a: &App, x: f32, y: f32) -> u8 {
 }
 
 fn zotero_bar_draw(a: &mut App, dirty: Rect) {
-    let Some((bar_rect, back_rect, cite_rect, back_lbl, cite_lbl)) = zotero_bar_layout(a) else {
+    let Some((bar_rect, back_rect, cite_rect, sync_rect, back_lbl, cite_lbl)) = zotero_bar_layout_full(a) else {
         if let Some(s) = a.ed.as_deref_mut() {
             s.zbar_rect = RECT_EMPTY;
             s.zbar_back = RECT_EMPTY;
             s.zbar_cite = RECT_EMPTY;
+            s.zbar_sync = RECT_EMPTY;
         }
         return;
     };
+    let syncing = ed_ref(a).zink_busy;
     let pressed = {
         let s = ed(a);
         s.zbar_rect = bar_rect;
         s.zbar_back = back_rect;
         s.zbar_cite = cite_rect;
+        s.zbar_sync = sync_rect;
         s.zbar_pressed
     };
     if !rect_overlaps(dirty, bar_rect) {
@@ -1706,6 +1973,11 @@ fn zotero_bar_draw(a: &mut App, dirty: Rect) {
         let st = if pressed == 2 { ButtonStyle::Selected } else { ButtonStyle::Plain };
         ui_button(c, cite_rect, IconKind::None, &cite_lbl, st);
     }
+    if !rect_is_empty(sync_rect) {
+        let st = if pressed == 4 { ButtonStyle::Selected } else { ButtonStyle::Plain };
+        let lbl = if syncing { ZBAR_SYNCING_LABEL } else { ZBAR_SYNC_LABEL };
+        ui_button(c, sync_rect, IconKind::None, lbl, st);
+    }
     a.screen.clip = clip;
 }
 
@@ -1714,27 +1986,30 @@ pub fn editor_zotero_bar_refresh(a: &mut App) {
     if a.scr != ScreenId::Editor || !a.ed.as_deref().is_some_and(|s| s.open) {
         return;
     }
-    if let Some((bar_rect, back_rect, cite_rect, _, _)) = zotero_bar_layout(a) {
+    if let Some((bar_rect, back_rect, cite_rect, sync_rect, _, _)) = zotero_bar_layout_full(a) {
         let s = ed(a);
         s.zbar_rect = bar_rect;
         s.zbar_back = back_rect;
         s.zbar_cite = cite_rect;
+        s.zbar_sync = sync_rect;
     } else {
         let s = ed(a);
         s.zbar_rect = RECT_EMPTY;
         s.zbar_back = RECT_EMPTY;
         s.zbar_cite = RECT_EMPTY;
+        s.zbar_sync = RECT_EMPTY;
         s.zbar_pressed = 0;
     }
     compose_all(a, RefreshMode::Ui);
 }
 
-/// Screen center of a control on the floating Zotero PDF bar (`"back"`, `"cite"`, or `"bar"`).
+/// Screen center of a control on the floating Zotero PDF bar (`"back"`, `"cite"`, `"sync"`, or `"bar"`).
 pub fn editor_zotero_bar_point(a: &App, name: &str) -> Option<(f32, f32)> {
-    let (bar_rect, back_rect, cite_rect, _, _) = zotero_bar_layout(a)?;
+    let (bar_rect, back_rect, cite_rect, sync_rect, _, _) = zotero_bar_layout_full(a)?;
     let r = match name {
         "back" => back_rect,
         "cite" => cite_rect,
+        "sync" => sync_rect,
         "bar" => bar_rect,
         _ => return None,
     };
@@ -1799,6 +2074,18 @@ pub fn editor_zotero_control(a: &mut App, key: &str, value: &str) -> bool {
     }
     if key == "bar.cite" || key == "cite_page" {
         return zotero_cite_current_page(a);
+    }
+    if key == "bar.sync" || key == "ink.sync" {
+        return zotero_ink_sync_start(a);
+    }
+    if key == "ink.sync_blocking" {
+        return zotero_ink_sync_blocking(a);
+    }
+    if key == "ink.reload" {
+        let s = ed(a);
+        zotero_ink_load_overlays(s);
+        zotero_ink_redraw(a);
+        return true;
     }
     if !a.ed.as_deref().is_some_and(|s| s.zsheet.open) {
         return false;
@@ -5163,9 +5450,12 @@ fn close_notebook(a: &mut App) {
     s.wl = WebLinks::default();
     s.zl.clear();
     s.zotero_src = None;
+    s.zink = None;
+    crate::zotero_ink::overlay_clear();
     s.zbar_rect = RECT_EMPTY;
     s.zbar_back = RECT_EMPTY;
     s.zbar_cite = RECT_EMPTY;
+    s.zbar_sync = RECT_EMPTY;
     s.zbar_pressed = 0;
     zotero_sheet_close(&mut s.zsheet);
     s.links_dirty = false; // (what a failed flush kept is left for this notebook's next open)
@@ -5229,9 +5519,12 @@ pub fn editor_open_notebook(a: &mut App, id: &str) {
     weblinks_prune(&mut s.wl, &s.nb);
     zotero_load(s);
     s.zotero_src = crate::zotero_sync::zotero_source_load(s.nb.id.as_str());
+    // Cached Zotero highlights / remote ink (zotero_ink_sync.json): registered before the first draw, offline, 0 network.
+    zotero_ink_load_overlays(s);
     s.zbar_rect = RECT_EMPTY;
     s.zbar_back = RECT_EMPTY;
     s.zbar_cite = RECT_EMPTY;
+    s.zbar_sync = RECT_EMPTY;
     s.zbar_pressed = 0;
     // The page it opens at was read before its links were: its beta.5 links migrate now, before the
     // first tap.
@@ -7566,9 +7859,15 @@ fn link_arm(a: &mut App, from_bar: bool, redraw: Option<u32>) {
     }
     let strip = strip_rect(a);
     let s = ed(a);
+    // The floating Zotero PDF bar hides while a link is being made: clear its pixels now, not on the next repaint.
+    let zbar = std::mem::replace(&mut s.zbar_rect, RECT_EMPTY);
+    s.zbar_back = RECT_EMPTY;
+    s.zbar_cite = RECT_EMPTY;
+    s.zbar_sync = RECT_EMPTY;
     s.lm = LinkMaking { state: LmState::Armed, strip, from_bar, redraw, ..Default::default() };
-    compose(a, strip);
-    app_invalidate(a, strip, RefreshMode::Ui);
+    let r = if rect_is_empty(zbar) { strip } else { rect_union(strip, zbar) };
+    compose(a, r);
+    app_invalidate(a, r, RefreshMode::Ui);
 }
 
 /// A pen down on the page while armed: the lasso begins there (never pen mode, never the live ink style).
@@ -13206,17 +13505,19 @@ fn editor_event_in(a: &mut App, ev: &InEvent) {
         }
         let zbar_hit = zotero_bar_hit(a, ev.x, ev.y);
         if zbar_hit != 0 {
-            if let Some((bar_rect, back_rect, cite_rect, _, _)) = zotero_bar_layout(a) {
+            if let Some((bar_rect, back_rect, cite_rect, sync_rect, _, _)) = zotero_bar_layout_full(a) {
                 let s = ed(a);
                 s.zbar_rect = bar_rect;
                 s.zbar_back = back_rect;
                 s.zbar_cite = cite_rect;
+                s.zbar_sync = sync_rect;
                 s.owner = Owner::ZoteroBar;
                 press_begin(&mut s.zbar_press, ev.x, ev.y, ev.t_ms);
-                s.zbar_pressed = if zbar_hit == 1 || zbar_hit == 2 { zbar_hit } else { 0 };
+                s.zbar_pressed = if matches!(zbar_hit, 1 | 2 | 4) { zbar_hit } else { 0 };
                 let btn = match s.zbar_pressed {
                     1 => back_rect,
                     2 => cite_rect,
+                    4 => sync_rect,
                     _ => RECT_EMPTY,
                 };
                 if !rect_is_empty(btn) {
@@ -13445,6 +13746,7 @@ fn owner_pointer(a: &mut App, ph: i32, ev: &InEvent, pen: bool) {
             let btn = match pressed {
                 1 => s.zbar_back,
                 2 => s.zbar_cite,
+                4 => s.zbar_sync,
                 _ => RECT_EMPTY,
             };
             s.zbar_pressed = 0;
@@ -13463,6 +13765,9 @@ fn owner_pointer(a: &mut App, ph: i32, ev: &InEvent, pen: bool) {
                 2 => {
                     zotero_cite_current_page(a);
                     compose_all(a, RefreshMode::Ui);
+                }
+                4 => {
+                    zotero_ink_sync_start(a);
                 }
                 _ => {}
             }
@@ -14208,6 +14513,22 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
                     _ => out.clear(),
                 }
             }
+            "bar.sync" => {
+                match zotero_bar_layout_full(a) {
+                    Some((_, _, _, r, _, _)) if !rect_is_empty(r) => {
+                        csnprintf!(out, cap, "%d,%d,%d,%d", r.x, r.y, r.w, r.h);
+                    }
+                    _ => out.clear(),
+                }
+            }
+            "ink.busy" => { csnprintf!(out, cap, "%d", s.zink_busy as i32); }
+            "ink.local" => { csnprintf!(out, cap, "%d", s.zink.as_ref().map_or(0, |z| z.local.len()) as i32); }
+            "ink.remote" => { csnprintf!(out, cap, "%d", s.zink.as_ref().map_or(0, |z| z.remote_ink.len()) as i32); }
+            "ink.highlights" => { csnprintf!(out, cap, "%d", s.zink.as_ref().map_or(0, |z| z.remote_highlights.len()) as i32); }
+            "ink.overlay" => {
+                let n = s.open_page().map_or(0, |p| crate::zotero_ink::overlay_prim_count(s.nb.id.as_str(), p.paper.0));
+                csnprintf!(out, cap, "%d", n as i32);
+            }
             "return" => {
                 if let Some(r) = a.zotero_return.as_ref() {
                     csnprintf!(out, cap, "%s:%u:%u", r.notebook_id.as_str(), r.page_id, r.page_index);
@@ -14618,6 +14939,8 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
             "zotero.bar.back".to_string()
         } else if here && zotero_bar_hit(a, x as f32, y as f32) == 2 {
             "zotero.bar.cite".to_string()
+        } else if here && zotero_bar_hit(a, x as f32, y as f32) == 4 {
+            "zotero.bar.sync".to_string()
         } else if here && zotero_badge_under(a, x as f32, y as f32).is_some() {
             "zotero.badge".to_string()
         } else if here && s.card.open {

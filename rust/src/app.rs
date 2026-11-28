@@ -2594,6 +2594,7 @@ fn zotero_tick(a: &mut App) {
                 }
             }
         }
+        ZkBgDone::InkSync { nb_id, result } => crate::editor::editor_zotero_ink_sync_done(a, &nb_id, result),
         ZkBgDone::PdfInfo { item, result } => {
             let pending = a.zotero_import.take();
             let (page, return_to, return_ctx, fetch_attempted) = match pending {

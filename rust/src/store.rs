@@ -4184,6 +4184,13 @@ pub fn store_page_dense(nb: &NotebookInfo, pid: u32) -> bool {
 pub fn store_page_slow(nb: &NotebookInfo, pid: u32) -> bool {
     page_render_files(nb, pid).is_some_and(|(source, _, _)| page_file_at_least(&source, STORE_SLOW_PAGE_BYTES))
 }
+/// A stamp of page pid's file as it is now (size, modification time), None where it has none: the same stamp
+/// means the same strokes (zotero_ink's page stamp cache: a page unchanged since the last Zotero ink sync is not
+/// read again).
+pub fn store_page_stamp(nb: &NotebookInfo, pid: u32) -> Option<String> {
+    let st = std::fs::symlink_metadata(page_path(nb, pid)).ok().filter(|m| m.file_type().is_file())?;
+    Some(format!("{}:{}:{}", st.len(), st.mtime(), st.mtime_nsec()))
+}
 /// The size of page pid's file in bytes, None where it has none (a blank page never written): for grimoire.log.
 pub fn store_page_file_bytes(nb: &NotebookInfo, pid: u32) -> Option<u64> {
     page_render_files(nb, pid).and_then(|(source, _, _)| std::fs::metadata(source).ok()).map(|m| m.len())
