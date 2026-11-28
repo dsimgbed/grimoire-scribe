@@ -66,8 +66,9 @@ expect editor.modal is none
 expect editor.page_ids is 1,2,3,4,5
 expect editor.page is 2
 expect toast is
-# (the page where the pad was, with the page count and the + turned next, in one refresh)
-expect display.presents is ui 20 1212 1820 1248
+# (the page where the pad was, with the page count and the + turned next, in one refresh; then the corner's
+# own, its p. X/Y now of 5 pages)
+expect display.presents is ui 20 1212 1820 1248, ui 6 6 619 66
 shot 02-added
 # The Pages view: the three marked new, its bottom row's Undo takes them back; the editor still on page 2
 tap panel pages

@@ -261,7 +261,10 @@ pins() {  # pins WHAT FILE LINE...: FILE has each LINE, and no other line reads 
     n=$(grep -c '\$[{]*GRIMOIRE_' "$file")
     check "$what reads no other GRIMOIRE_* variable ($n in all)" is "$n" $#
 }
-pins "Grimoire.sh" "$B/script.sh" 'US=${GRIMOIRE_US:-/mnt/us}' 'TMP=${GRIMOIRE_TMP:-/tmp}'
+# (the last: the Grimoire x Zotero bridge copy, GRIMOIRE_DEV=1, tapped in the Library goes through the trampoline;
+# unset on a stock install)
+pins "Grimoire.sh" "$B/script.sh" 'US=${GRIMOIRE_US:-/mnt/us}' 'TMP=${GRIMOIRE_TMP:-/tmp}' \
+    'if [ "${GRIMOIRE_DEV:-}" = 1 ] && [ "${GZ_UNDER_TRAMPOLINE:-0}" != 1 ] && [ -z "$1" ] \'
 pins "app/grimoire.sh" "$B/app/grimoire.sh" 'US=${GRIMOIRE_US:-/mnt/us}' 'TMP=${GRIMOIRE_TMP:-/tmp}' \
     'SYS=${GRIMOIRE_SYSROOT:-}' 'WD_TICK=${GRIMOIRE_WD_TICK:-2}' 'WD_FIRST=${GRIMOIRE_WD_FIRST:-25}' \
     'WD_STALE=${GRIMOIRE_WD_STALE:-15}' 'if [ "${GRIMOIRE_DEV:-}" = 1 ]; then UPDATE_SCRIPT=""; fi' \
@@ -287,12 +290,13 @@ for w in "lipc-wait-event -s 0 $EVENTS" "lipc-wait-event -m -s 0 $EVENTS"; do
     check "restore()'s pkill pattern matches '$w'" sh -c 'printf "%s\n" "$2" | grep -qE -- "$1"' sh "$PAT" "$w"
 done
 
-# The size guard (the owner's decision D23, raised by him for 2.1.0-beta.2 and again for 2.2): the Kindle binary
-# stays under 13 MB and the zip under 7 MB (the binary is on the Kindle twice: in documents/Grimoire.sh's archive and
+# The size guard (the owner's decision D23, raised by him for 2.1.0-beta.2 and again for 2.2; 14 MB for the
+# binary as upstream's main has it after 2.2, issue #253, which the Zotero bridge needs too): the Kindle binary
+# stays under 14 MB and the zip under 7 MB (the binary is on the Kindle twice: in documents/Grimoire.sh's archive and
 # as app/grimoire).
 BIN_SIZE=$(wc -c <"$B/app/grimoire" | tr -d ' ')
 ZIP_SIZE=$(wc -c <"$ZIP" | tr -d ' ')
-check "the Kindle binary is under 13 MB ($BIN_SIZE bytes)" [ "$BIN_SIZE" -lt 13000000 ]
+check "the Kindle binary is under 14 MB ($BIN_SIZE bytes)" [ "$BIN_SIZE" -lt 14000000 ]
 check "the zip is under 7 MB ($ZIP_SIZE bytes)" [ "$ZIP_SIZE" -lt 7000000 ]
 
 if [ $fail = 0 ]; then

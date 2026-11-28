@@ -40,7 +40,8 @@ expect editor.pages is 102
 expect editor.page is 2
 expect editor.add_notices is 1
 expect toast is
-expect display.presents is ui 20 1310 1820 1150, ui 20 1212 1820 1248
+# (and the corner's own after them, its p. X/Y now of 102 pages)
+expect display.presents is ui 20 1310 1820 1150, ui 20 1212 1820 1248, ui 6 6 657 66
 # The Pages view's New page held: 10 pages, no notice
 tap panel pages
 waitbg
