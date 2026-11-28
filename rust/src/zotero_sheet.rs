@@ -32,6 +32,7 @@ const ZS_CLEAR_SEARCH: i32 = 13;
 const ZS_COLLECTION: i32 = 14;
 const ZS_PREV: i32 = 15;
 const ZS_NEXT: i32 = 16;
+const ZS_OPEN_CURRENT: i32 = 17;
 
 /// Which side of the sheet is up.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -93,6 +94,8 @@ pub enum ZsResult {
     Open(ZoteroSheetRow),
     /// open a PDF item directly in Grimoire (saving current essay first)
     OpenPdf(ZoteroSheetRow),
+    /// hand off the currently open Zotero-bound PDF page directly to Zotero (escape hatch)
+    OpenCurrentInZotero,
     /// discard a pending citation (a catalog row has nothing to discard)
     Discard(ZoteroSheetRow),
 }
@@ -126,6 +129,8 @@ pub struct ZoteroSheet {
     pub status: String,
     pub custom_status: String,
     pub kb: Keyboard,
+    /// When opened from a Zotero-bound PDF notebook: `(item_key, attachment_key, page_one_based)`.
+    pub current_pdf: Option<(String, String, u32)>,
 }
 
 fn u(v: f32) -> i32 {
@@ -274,6 +279,7 @@ pub fn zotero_sheet_close(z: &mut ZoteroSheet) {
     keyboard_close(&mut z.kb);
     z.open = false;
     z.has_pressed = false;
+    z.current_pdf = None;
 }
 
 /// Set a scrubbed status line on the sheet.
@@ -343,6 +349,15 @@ pub fn zotero_sheet_layout(z: &mut ZoteroSheet, aw: i32, ah: i32) {
         let or = Rect { x: h_right - ow, y: hy, w: ow, h: hh };
         if !busy {
             hits_add(&mut z.hits, or, ZS_OPEN_PDF, 0);
+        }
+        h_right = or.x - u(12.0);
+    }
+    if z.current_pdf.is_some() {
+        let title_min_w = font_measure(FontFace::Bold, ui_text_size(), "Zotero") + u(28.0);
+        let cw = ui_button_need_w(hh, IconKind::None, "Open in Zotero", ButtonStyle::Plain).max(u(270.0));
+        if h_right - cw >= inn.x + title_min_w {
+            let cr = Rect { x: h_right - cw, y: hy, w: cw, h: hh };
+            hits_add(&mut z.hits, cr, ZS_OPEN_CURRENT, 0);
         }
     }
 
@@ -569,6 +584,15 @@ pub fn zotero_sheet_draw(z: &mut ZoteroSheet, a: &mut App, r: Rect) -> Rect {
         let or = Rect { x: h_right - ow, y: hy, w: ow, h: hh };
         ui_button(c, or, IconKind::None, "Open PDF", st);
         h_right = or.x - u(12.0);
+    }
+    if z.current_pdf.is_some() {
+        let title_min_w = font_measure(FontFace::Bold, ts, "Zotero") + u(28.0);
+        let cw = ui_button_need_w(hh, IconKind::None, "Open in Zotero", ButtonStyle::Plain).max(u(270.0));
+        if h_right - cw >= inn.x + title_min_w {
+            let cr = Rect { x: h_right - cw, y: hy, w: cw, h: hh };
+            ui_button(c, cr, IconKind::None, "Open in Zotero", ButtonStyle::Plain);
+            h_right = cr.x - u(12.0);
+        }
     }
 
     let title_w = (h_right - inn.x).max(u(200.0));
@@ -867,6 +891,13 @@ pub fn zotero_sheet_pointer(z: &mut ZoteroSheet, a: &mut App, ph: i32, ev: &InEv
             ZsResult::Changed
         }
         ZS_OPEN_PDF => zotero_sheet_selected(z).cloned().map_or(ZsResult::None, ZsResult::OpenPdf),
+        ZS_OPEN_CURRENT => {
+            if z.current_pdf.is_some() {
+                ZsResult::OpenCurrentInZotero
+            } else {
+                ZsResult::None
+            }
+        }
         ZS_INBOX | ZS_LIBRARY if h.id == ZS_INBOX && z.tab != ZoteroTab::Inbox => {
             keyboard_close(&mut z.kb);
             z.tab = ZoteroTab::Inbox;
@@ -965,6 +996,7 @@ pub fn zotero_sheet_control_point(z: &ZoteroSheet, name: &str) -> Option<(f32, f
                 "add" => ZS_ADD,
                 "open" => ZS_OPEN,
                 "open_pdf" => ZS_OPEN_PDF,
+                "open_current" => ZS_OPEN_CURRENT,
                 "discard" => ZS_DISCARD,
                 "refresh" => ZS_REFRESH,
                 "sync" => ZS_SYNC,
@@ -996,6 +1028,7 @@ pub fn zotero_sheet_hit_name(z: &ZoteroSheet, x: i32, y: i32) -> String {
             ZS_ADD => "zotero.add".to_string(),
             ZS_OPEN => "zotero.open".to_string(),
             ZS_OPEN_PDF => "zotero.open_pdf".to_string(),
+            ZS_OPEN_CURRENT => "zotero.open_current".to_string(),
             ZS_DISCARD => "zotero.discard".to_string(),
             ZS_REFRESH => "zotero.refresh".to_string(),
             ZS_SYNC => "zotero.sync".to_string(),
@@ -1095,6 +1128,13 @@ pub fn zotero_sheet_control(z: &mut ZoteroSheet, a: &mut App, key: &str, value: 
         "add" => zotero_sheet_selected(z).cloned().map_or(ZsResult::None, ZsResult::Add),
         "open" => zotero_sheet_selected(z).cloned().map_or(ZsResult::None, ZsResult::Open),
         "open_pdf" => zotero_sheet_selected(z).cloned().map_or(ZsResult::None, ZsResult::OpenPdf),
+        "open_current" => {
+            if z.current_pdf.is_some() {
+                ZsResult::OpenCurrentInZotero
+            } else {
+                ZsResult::None
+            }
+        }
         "discard" => zotero_sheet_selected(z).cloned().map_or(ZsResult::None, ZsResult::Discard),
         _ => ZsResult::None,
     }

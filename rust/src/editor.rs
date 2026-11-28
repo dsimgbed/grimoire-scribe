@@ -146,14 +146,16 @@ pub(crate) enum Owner {
     Widget = 24,
     /// a contact that began on the Zotero sheet or a Zotero citation badge
     Zotero = 25,
+    /// a contact that began on the floating Zotero PDF bar (Back to essay / Cite page)
+    ZoteroBar = 26,
 }
 
 /// The owner's name in grimoire.log and the `editor.owner` probe.
 fn owner_name(o: Owner) -> &'static str {
-    const K: [&str; 26] = [
+    const K: [&str; 27] = [
         "none", "draw", "erase", "panel", "modal", "display", "pages", "tools", "build", "templates", "link", "bar",
         "outside", "find", "lasso", "card", "linkto", "strip", "map", "pen-drag", "select", "add-pad", "quick-size",
-        "widgets", "widget", "zotero",
+        "widgets", "widget", "zotero", "zotero-bar",
     ];
     K[o as usize]
 }
@@ -578,6 +580,15 @@ pub struct EditorState {
     zsheet: ZoteroSheet,
     /// this notebook's Zotero citation badges (zoterolinks.ini)
     zl: ZoteroLinksState,
+    /// Zotero PDF metadata (`zotero_source.json`) when the open notebook is a Zotero-bound PDF
+    zotero_src: Option<crate::zotero_sync::ZoteroNotebookSource>,
+    /// floating Zotero PDF bar geometry (screen px): outer bar, Back to essay button, Cite page button
+    zbar_rect: Rect,
+    zbar_back: Rect,
+    zbar_cite: Rect,
+    /// active press on the floating Zotero PDF bar: 0 = none, 1 = Back, 2 = Cite
+    zbar_pressed: u8,
+    zbar_press: Press,
     /// Link to... (linkbar.rs in pick mode): where a new link goes, while its area waits (lm Pick)
     lt: LinkBar,
     /// the long-press card (linkcard.rs): a link held on the page, or a row held on the bar
@@ -954,30 +965,37 @@ pub(crate) fn map_dirty(a: &mut App) {
     }
 }
 
-/// Size a Zotero card/pill area, optionally carrying a quote, avoiding overlapping existing cards.
-fn zotero_card_area(s: &EditorState, pid: u32, short_cite: &str, quote: &str) -> Rect {
-    let (margin_x, margin_y) = (240.min(s.pgw / 4), 160.min(s.pgh / 8));
+/// Size a Zotero card/pill area inside an arbitrary notebook page, avoiding existing cards.
+fn zotero_card_area_in(
+    pgw: i32,
+    pgh: i32,
+    links: &crate::zotero_bridge::ZoteroLinks,
+    pid: u32,
+    short_cite: &str,
+    quote: &str,
+) -> Rect {
+    let (margin_x, margin_y) = (240.min(pgw / 4), 160.min(pgh / 8));
     let (w, h) = if quote.is_empty() {
         let label = format!("Z  {}", short_cite);
         let text_w = crate::font::font_measure(crate::font::FontFace::Bold, 36.0, &label);
-        let w = (text_w + 64).clamp(260, 860.min(s.pgw - margin_x - 60));
+        let w = (text_w + 64).clamp(260, 860.min((pgw - margin_x - 60).max(260)));
         let h = 84;
         (w, h)
     } else {
-        let mut w = ((s.pgw as f32) * 0.55).round() as i32;
-        w = w.clamp(480, (s.pgw - margin_x - 80).max(480));
+        let mut w = ((pgw as f32) * 0.55).round() as i32;
+        w = w.clamp(480, (pgw - margin_x - 80).max(480));
         let inner_w = (w - 58).max(120);
         let lines = crate::font::font_wrap_lines(crate::font::FontFace::Regular, 40.0, quote, inner_w, None).max(1);
         let lh = (crate::font::font_ascent(crate::font::FontFace::Regular, 40.0)
             + crate::font::font_descent(crate::font::FontFace::Regular, 40.0))
         .max(44);
         let needed_h = 22 + lines * lh + 18 + 44 + 18;
-        let cap_h = ((s.pgh as f32) * 0.38).round() as i32;
+        let cap_h = ((pgh as f32) * 0.38).round() as i32;
         let h = needed_h.clamp(140, cap_h);
         (w, h)
     };
 
-    let existing: Vec<Rect> = crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).iter().map(|z| z.area).collect();
+    let existing: Vec<Rect> = crate::zotero_bridge::zoterolinks_of(links, pid).iter().map(|z| z.area).collect();
     let gap = 20;
     let mut x = margin_x;
     let mut y = margin_y;
@@ -987,19 +1005,55 @@ fn zotero_card_area(s: &EditorState, pid: u32, short_cite: &str, quote: &str) ->
             break;
         };
         y = hit.y + hit.h + gap;
-        if y + h > s.pgh - 80 {
+        if y + h > pgh - 80 {
             x = hit.x + hit.w + gap;
             y = margin_y;
-            if x + w > s.pgw - 40 {
+            if x + w > pgw - 40 {
                 x = margin_x;
                 y = margin_y + 40;
                 break;
             }
         }
     }
-    let x = x.clamp(margin_x, (s.pgw - w - 20).max(margin_x));
-    let y = y.clamp(margin_y, (s.pgh - h - 20).max(margin_y));
+    let x = x.clamp(margin_x, (pgw - w - 20).max(margin_x));
+    let y = y.clamp(margin_y, (pgh - h - 20).max(margin_y));
     Rect { x, y, w, h }
+}
+
+/// Size a Zotero card/pill area, optionally carrying a quote, avoiding overlapping existing cards.
+fn zotero_card_area(s: &EditorState, pid: u32, short_cite: &str, quote: &str) -> Rect {
+    zotero_card_area_in(s.pgw, s.pgh, &s.zl.links, pid, short_cite, quote)
+}
+
+/// The currently open editor page as a Zotero `ReturnPlace`.
+fn current_return_place(a: &App) -> Option<crate::zotero_bridge::ReturnPlace> {
+    let s = a.ed.as_deref()?;
+    if !s.open || s.nb.id.is_empty() {
+        return None;
+    }
+    Some(crate::zotero_bridge::Handoff::return_to(
+        s.nb.id.as_str(),
+        s.open_pid(),
+        s.index.max(0) as u32,
+    ))
+}
+
+/// Remember the currently open non-Zotero notebook page as `a.last_essay`, so a Zotero PDF opened
+/// later (even from the Library rather than from a badge) can still 1-tap cite directly into it.
+fn record_last_essay(a: &mut App) {
+    let ctx = {
+        let Some(s) = a.ed.as_deref() else { return };
+        if !s.open || s.nb.id.is_empty() || s.zotero_src.is_some() {
+            return;
+        }
+        crate::app::ZoteroReturnContext {
+            notebook_id: s.nb.id.to_string(),
+            page_id: s.open_pid(),
+            page_index: s.index.max(0) as u32,
+            notebook_title: s.nb.name.to_string(),
+        }
+    };
+    a.last_essay = Some(ctx);
 }
 
 /// Remove one pending citation (memory and inbox file) after it has become a page link or been discarded.
@@ -1068,29 +1122,207 @@ pub(crate) fn zotero_add_row(a: &mut App, row: &ZoteroSheetRow, consume: bool) -
     true
 }
 
+/// Append a citation badge directly into an off-screen essay notebook's `zoterolinks.ini`.
+fn zotero_append_ref_to_notebook(
+    nb_id: &str,
+    page_id: u32,
+    page_index: u32,
+    item_key: &str,
+    attachment_key: &str,
+    page_one_based: u32,
+    locator: &str,
+    short_cite: &str,
+    quote: &str,
+) -> Result<String, ()> {
+    if nb_id.is_empty() || item_key.is_empty() {
+        return Err(());
+    }
+    let mut nb = NotebookInfo::default();
+    if store_load_info(nb_id, &mut nb) != 0 || nb.page_ids.is_empty() {
+        return Err(());
+    }
+    let pid = if page_id != 0 && nb.page_ids.contains(&page_id) {
+        page_id
+    } else {
+        nb.page_ids[(page_index as usize).min(nb.page_ids.len() - 1)]
+    };
+    let (mut pgw, mut pgh) = (0, 0);
+    store_notebook_page_size(&nb, &mut pgw, &mut pgh);
+    if pgw <= 0 || pgh <= 0 {
+        pgw = 1860;
+        pgh = 2480;
+    }
+    let mut links = crate::zotero_bridge::zoterolinks_load(nb_id);
+    crate::zotero_bridge::zoterolinks_prune(&mut links, &nb);
+    let area = zotero_card_area_in(pgw, pgh, &links, pid, short_cite, quote);
+    let mut seed = crate::zotero_bridge::zotero_seed(pid, item_key);
+    let existing = crate::zotero_bridge::zoterolinks_of(&links, pid);
+    let replaces_placeholder = existing.iter().any(|l| l.seed == seed && l.page == 0 && l.quote.is_empty());
+    if !replaces_placeholder {
+        while existing.iter().any(|l| l.seed == seed) {
+            seed = (seed.wrapping_add(1)) | 0x8000_0000;
+        }
+    }
+    let zref = Zref {
+        pid,
+        seed,
+        area,
+        item_key: item_key.to_string(),
+        attachment_key: attachment_key.to_string(),
+        page: page_one_based,
+        locator: locator.to_string(),
+        short_cite: short_cite.to_string(),
+        quote: quote.to_string(),
+    };
+    if !links.push(zref) {
+        return Err(());
+    }
+    if crate::zotero_bridge::zoterolinks_save(nb_id, &mut links, &nb) != 0 {
+        return Err(());
+    }
+    libindex_revalidate();
+    Ok(nb.name.to_string())
+}
+
+/// 1-tap Cite from a Zotero-bound PDF page: writes a citation badge directly onto the active
+/// essay page (from `a.zotero_return` or `a.last_essay`), or queues a citation into the Zotero
+/// Inbox when no live essay notebook is recorded.
+pub(crate) fn zotero_cite_current_page(a: &mut App) -> bool {
+    let (cur_nb_id, src, page) = {
+        let Some(s) = a.ed.as_deref() else { return false };
+        if !s.open || s.nb.id.is_empty() {
+            return false;
+        }
+        let Some(src) = s.zotero_src.clone() else { return false };
+        let page = ((s.index + 1).clamp(1, s.nb.npages().max(1))) as u32;
+        (s.nb.id.to_string(), src, page)
+    };
+    let item_key = if !src.item_key.is_empty() {
+        src.item_key.clone()
+    } else {
+        src.attachment_key.clone()
+    };
+    if item_key.is_empty() {
+        return false;
+    }
+    let page_label = crate::zotero_sync::zotero_source_page_label(&src, page);
+    let locator = format!("p. {page_label}");
+    let short_cite = crate::zotero_sync::zotero_source_short_cite(&src, page);
+
+    let candidates = [a.zotero_return.clone(), a.last_essay.clone()];
+    for (idx, maybe_ctx) in candidates.into_iter().enumerate() {
+        let Some(ctx) = maybe_ctx else { continue };
+        if ctx.notebook_id.is_empty()
+            || ctx.notebook_id == cur_nb_id
+            || crate::zotero_sync::zotero_source_load(&ctx.notebook_id).is_some()
+        {
+            continue;
+        }
+        match zotero_append_ref_to_notebook(
+            &ctx.notebook_id,
+            ctx.page_id,
+            ctx.page_index,
+            &item_key,
+            &src.attachment_key,
+            page,
+            &locator,
+            &short_cite,
+            "",
+        ) {
+            Ok(nb_name) => {
+                let display_title = if !nb_name.trim().is_empty() {
+                    nb_name.trim().to_string()
+                } else if !ctx.notebook_title.trim().is_empty() {
+                    ctx.notebook_title.trim().to_string()
+                } else {
+                    "essay".to_string()
+                };
+                app_toast(a, &format!("Cited p. {} in {}", page_label, display_title), 2600);
+                return true;
+            }
+            Err(()) => {
+                if idx == 0 && a.zotero_return.as_ref().is_some_and(|r| r.notebook_id == ctx.notebook_id) {
+                    a.zotero_return = None;
+                }
+                if a.last_essay.as_ref().is_some_and(|r| r.notebook_id == ctx.notebook_id) {
+                    a.last_essay = None;
+                }
+            }
+        }
+    }
+
+    if !bridge_exists() {
+        app_toast(a, "Couldn't cite this page.", 3000);
+        return false;
+    }
+    static CITE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let now_sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(1);
+    let seq = CITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let safe_key: String = item_key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(24)
+        .collect();
+    let id = format!("grimoire_{}_p{}_{}", if safe_key.is_empty() { "ref" } else { &safe_key }, page, seq);
+    let cit = crate::zotero_bridge::ZoteroCitation {
+        schema_version: crate::zotero_bridge::SCHEMA_VERSION,
+        id,
+        created_at: now_sec,
+        item_key,
+        attachment_key: src.attachment_key,
+        short_cite,
+        title: src.title,
+        authors: src.authors,
+        year: src.year,
+        page,
+        locator,
+        quote: String::new(),
+        note: String::new(),
+    };
+    if crate::zotero_bridge::citation_write_in(&crate::zotero_bridge::bridge_dir(), &cit) == 0 {
+        app_toast(a, &format!("Queued p. {} in Zotero inbox", page_label), 2600);
+        true
+    } else {
+        app_toast(a, "Couldn't cite this page.", 3000);
+        false
+    }
+}
+
+/// Title of notebook `id` if it is currently open in the editor.
+pub(crate) fn editor_open_notebook_title(a: &App, id: &str) -> Option<String> {
+    let s = a.ed.as_deref()?;
+    (s.open && s.nb.id.as_str() == id).then(|| s.nb.name.to_string())
+}
+
 /// The Zotero handoff for a badge tap, a sheet Open, or a `z:` nav target.
 fn zotero_handoff(a: &mut App, item: &str, attachment: &str, page: u32, locator: &str) -> i32 {
     if !bridge_exists() || item.is_empty() {
         return -1;
     }
-    let (nbid, pid, index) = {
-        let s = ed_ref(a);
-        if !s.open || s.nb.id.is_empty() {
-            (String::new(), 0u32, 0u32)
-        } else {
-            (s.nb.id.to_string(), s.open_pid(), s.index.max(0) as u32)
-        }
-    };
-    let place = if nbid.is_empty() {
-        None
-    } else {
-        Some(crate::zotero_bridge::Handoff::return_to(nbid.as_str(), pid, index))
-    };
+    let place = current_return_place(a);
     crate::zotero_bridge::app_request_zotero_handoff(a, item, attachment, page, locator, place)
 }
 
 fn zotero_open_row(a: &mut App, row: &ZoteroSheetRow) {
-    if zotero_handoff(a, row.item_key.as_str(), row.attachment_key.as_str(), row.page, row.locator.as_str()) != 0 {
+    let page = if row.page > 0 {
+        row.page
+    } else {
+        let s = ed_ref(a);
+        let matches_cur = s.open
+            && s.zotero_src.as_ref().is_some_and(|src| {
+                (!row.attachment_key.is_empty() && src.attachment_key == row.attachment_key)
+                    || (!row.item_key.is_empty() && src.item_key == row.item_key)
+            });
+        if matches_cur {
+            (s.index.max(0) as u32) + 1
+        } else {
+            0
+        }
+    };
+    if zotero_handoff(a, row.item_key.as_str(), row.attachment_key.as_str(), page, row.locator.as_str()) != 0 {
         app_toast(a, "Couldn't hand off to Zotero.", 3000);
     } else {
         zotero_save(a);
@@ -1098,6 +1330,65 @@ fn zotero_open_row(a: &mut App, row: &ZoteroSheetRow) {
 }
 
 fn zotero_open_ref(a: &mut App, z: &Zref) {
+    if z.item_key.is_empty() && z.attachment_key.is_empty() {
+        return;
+    }
+
+    // 1. Look up index match, preferring exact attachment_key, then item_key.
+    let idx_item = crate::zotero_bridge::library_index_load().and_then(|idx| {
+        if !z.attachment_key.is_empty() {
+            if let Some(it) = idx.items.iter().find(|it| it.attachment_key == z.attachment_key) {
+                return Some(it.clone());
+            }
+        }
+        if !z.item_key.is_empty() {
+            idx.items.iter().find(|it| it.item_key == z.item_key).cloned()
+        } else {
+            None
+        }
+    });
+
+    // 2–4. Find an already-bound Grimoire PDF notebook without spawning zk-sync.
+    let mut bound_nb = if !z.attachment_key.is_empty() {
+        crate::zotero_sync::find_notebook_by_attachment_key(&z.attachment_key)
+    } else {
+        None
+    };
+    if bound_nb.is_none() {
+        if let Some(it) = idx_item.as_ref() {
+            if it.has_pdf && !it.attachment_key.is_empty() {
+                bound_nb = crate::zotero_sync::find_notebook_by_attachment_key(&it.attachment_key);
+            }
+        }
+    }
+    if bound_nb.is_none() && !z.item_key.is_empty() && idx_item.as_ref().is_none_or(|it| it.has_pdf) {
+        bound_nb = crate::zotero_sync::find_notebook_by_item_key(&z.item_key);
+    }
+
+    // 5. Instant in-Grimoire switch to the bound notebook (zero zk-sync, zero exit-42).
+    if let Some(nb_id) = bound_nb {
+        let place = current_return_place(a);
+        zotero_save(a);
+        crate::app::zotero_open_bound_notebook(a, &nb_id, z.page, place);
+        return;
+    }
+
+    // 6. Unbound PDF in the catalog: trigger Phase 2 fetch+import pipeline when zk-sync is
+    //    available or the PDF is already cached on disk (otherwise fall through to step 7 so
+    //    legacy handoffs preserve `z.locator`).
+    if let Some(it) = idx_item {
+        if it.has_pdf
+            && !it.attachment_key.is_empty()
+            && (crate::zotero_sync::zk_sync_available() || crate::zotero_sync::zotero_pdf_on_disk(&it))
+        {
+            let place = current_return_place(a);
+            zotero_save(a);
+            crate::app::zotero_open_item(a, &it, z.page, place);
+            return;
+        }
+    }
+
+    // 7. Fallback (non-PDF: EPUB/Snapshot/metadata-only, or unknown/offline item): hand off to Zotero.
     if zotero_handoff(a, z.item_key.as_str(), z.attachment_key.as_str(), z.page, z.locator.as_str()) != 0 {
         app_toast(a, "Couldn't hand off to Zotero.", 3000);
     } else {
@@ -1106,18 +1397,7 @@ fn zotero_open_ref(a: &mut App, z: &Zref) {
 }
 
 fn zotero_open_pdf_row(a: &mut App, row: &ZoteroSheetRow) {
-    let place = {
-        let s = ed_ref(a);
-        if !s.open || s.nb.id.is_empty() {
-            None
-        } else {
-            Some(crate::zotero_bridge::Handoff::return_to(
-                s.nb.id.as_str(),
-                s.open_pid(),
-                s.index.max(0) as u32,
-            ))
-        }
-    };
+    let place = current_return_place(a);
     zotero_save(a);
     let item = row.item.clone().unwrap_or_else(|| ZoteroLibraryItem {
         item_key: row.item_key.clone(),
@@ -1155,6 +1435,28 @@ fn zotero_result(a: &mut App, r: ZsResult, d: Rect) {
         }
         ZsResult::Open(row) => zotero_open_row(a, &row),
         ZsResult::OpenPdf(row) => zotero_open_pdf_row(a, &row),
+        ZsResult::OpenCurrentInZotero => {
+            let cur = ed_ref(a).zsheet.current_pdf.clone().or_else(|| {
+                let s = ed_ref(a);
+                s.open.then(|| {
+                    s.zotero_src.as_ref().map(|src| {
+                        let ik = if !src.item_key.is_empty() {
+                            src.item_key.clone()
+                        } else {
+                            src.attachment_key.clone()
+                        };
+                        (ik, src.attachment_key.clone(), (s.index.max(0) as u32) + 1)
+                    })
+                })?
+            });
+            if let Some((item_key, attachment_key, page)) = cur {
+                if zotero_handoff(a, &item_key, &attachment_key, page, "") != 0 {
+                    app_toast(a, "Couldn't hand off to Zotero.", 3000);
+                } else {
+                    zotero_save(a);
+                }
+            }
+        }
         ZsResult::Discard(row) => {
             zotero_consume(a, row.id.as_str());
             with_modal(a, |s| &mut s.zsheet, |z, _| { zotero_sheet_refresh(z); });
@@ -1168,8 +1470,245 @@ fn zotero_show(a: &mut App) {
     if !bridge_exists() {
         return;
     }
-    with_modal(a, |s| &mut s.zsheet, |z, a| { zotero_sheet_open(z, a); });
+    let current_pdf = {
+        let s = ed_ref(a);
+        if s.open {
+            s.zotero_src.as_ref().map(|src| {
+                let ik = if !src.item_key.is_empty() {
+                    src.item_key.clone()
+                } else {
+                    src.attachment_key.clone()
+                };
+                (ik, src.attachment_key.clone(), (s.index.max(0) as u32) + 1)
+            })
+        } else {
+            None
+        }
+    };
+    with_modal(a, |s| &mut s.zsheet, |z, a| {
+        zotero_sheet_open(z, a);
+        z.current_pdf = current_pdf;
+        zotero_sheet_layout(z, a.w, a.h);
+    });
     compose_all(a, RefreshMode::Ui);
+}
+
+// ---- Floating Zotero PDF bar (← Back + Cite p. N) ----
+
+fn zotero_bar_visible(a: &App) -> bool {
+    a.scr == ScreenId::Editor
+        && a.ed.as_deref().is_some_and(|s| {
+            s.open
+                && s.zotero_src.is_some()
+                && !sheet_open(s)
+                && !s.add_kb.open
+                && s.lm.state == LmState::Off
+                && s.sel.state == SelState::Off
+        })
+}
+
+fn zotero_bar_back_label(a: &App, bh: i32) -> Option<String> {
+    let s = a.ed.as_deref()?;
+    let ret = a.zotero_return.as_ref()?;
+    if ret.notebook_id.is_empty() || ret.notebook_id == s.nb.id.as_str() {
+        return None;
+    }
+    let max_w = ui_px(380.0);
+    let title = ret.notebook_title.trim();
+    if title.is_empty() {
+        return Some("Back".to_string());
+    }
+    if ui_button_need_w(bh, IconKind::Back, title, ButtonStyle::Plain) <= max_w {
+        return Some(title.to_string());
+    }
+    let chars: Vec<char> = title.chars().collect();
+    let mut n = chars.len();
+    while n > 1 {
+        n -= 1;
+        let prefix: String = chars[..n].iter().collect();
+        let cand = format!("{}...", prefix.trim_end());
+        if ui_button_need_w(bh, IconKind::Back, &cand, ButtonStyle::Plain) <= max_w {
+            return Some(cand);
+        }
+    }
+    Some("Back".to_string())
+}
+
+/// Compute overlap-free top-right geometry for the floating Zotero PDF bar:
+/// `Some((bar_rect, back_rect, cite_rect, back_label, cite_label))`.
+fn zotero_bar_layout(a: &App) -> Option<(Rect, Rect, Rect, String, String)> {
+    if !zotero_bar_visible(a) {
+        return None;
+    }
+    let s = ed_ref(a);
+    let bh = ui_px(84.0);
+    let gap = ui_px(12.0);
+    let margin_x = ui_px(28.0);
+    let top_y = ui_px(16.0).max(status_reserved(a) + ui_px(8.0));
+
+    let page_1based = ((s.index + 1).clamp(1, s.nb.npages().max(1))) as u32;
+    let cite_label = format!("Cite p. {}", page_1based);
+    let cite_w = ui_button_need_w(bh, IconKind::None, &cite_label, ButtonStyle::Plain).max(ui_px(210.0));
+
+    let (back_label, back_w) = match zotero_bar_back_label(a, bh) {
+        Some(lbl) => {
+            let w = ui_button_need_w(bh, IconKind::Back, &lbl, ButtonStyle::Plain).clamp(ui_px(176.0), ui_px(390.0));
+            (lbl, w)
+        }
+        None => (String::new(), 0),
+    };
+    let total_w = if back_w > 0 { back_w + gap + cite_w } else { cite_w };
+
+    let status_z = status_zone(a);
+    let panel_z = if rect_is_empty(s.panel) { RECT_EMPTY } else { rect_inflate(s.panel, ui_px(8.0)) };
+    let clear = |r: Rect| -> bool {
+        r.x >= margin_x
+            && r.x + r.w <= a.w - margin_x
+            && r.y >= top_y
+            && r.y + r.h <= a.h - ui_px(16.0)
+            && (rect_is_empty(status_z) || !rect_overlaps(r, status_z))
+            && (rect_is_empty(panel_z) || !rect_overlaps(r, panel_z))
+    };
+
+    let mut cands = Vec::with_capacity(6);
+    let right_x = (a.w - margin_x - total_w).max(margin_x);
+    cands.push(Rect::new(right_x, top_y, total_w, bh));
+    if !rect_is_empty(status_z) && rect_overlaps(Rect::new(right_x, top_y, total_w, bh), status_z) {
+        cands.push(Rect::new((status_z.x - gap - total_w).max(margin_x), top_y, total_w, bh));
+    }
+    if !rect_is_empty(panel_z) && rect_overlaps(Rect::new(right_x, top_y, total_w, bh), panel_z) {
+        cands.push(Rect::new((panel_z.x - gap - total_w).max(margin_x), top_y, total_w, bh));
+    }
+    cands.push(Rect::new(margin_x, top_y, total_w, bh));
+    // Centered between left/right obstacles in the top band.
+    let mut left_bound = margin_x;
+    let mut right_bound = a.w - margin_x;
+    for obs in [status_z, panel_z] {
+        if !rect_is_empty(obs) && obs.y < top_y + bh && obs.y + obs.h > top_y {
+            if obs.x + obs.w / 2 < a.w / 2 {
+                left_bound = left_bound.max(obs.x + obs.w + gap);
+            } else {
+                right_bound = right_bound.min(obs.x - gap);
+            }
+        }
+    }
+    if right_bound - left_bound >= total_w {
+        let cx = left_bound + (right_bound - left_bound - total_w) / 2;
+        cands.push(Rect::new(cx, top_y, total_w, bh));
+    }
+
+    let bar_rect = cands
+        .into_iter()
+        .find(|&r| clear(r))
+        .unwrap_or_else(|| {
+            let mut below_y = top_y;
+            for obs in [status_z, panel_z] {
+                if !rect_is_empty(obs) && rect_overlaps(Rect::new(right_x, below_y, total_w, bh), obs) {
+                    below_y = below_y.max(obs.y + obs.h + gap);
+                }
+            }
+            let y = below_y.clamp(top_y, (a.h - ui_px(16.0) - bh).max(top_y));
+            Rect::new(right_x, y, total_w, bh)
+        });
+
+    let back_rect = if back_w > 0 {
+        Rect::new(bar_rect.x, bar_rect.y, back_w, bh)
+    } else {
+        RECT_EMPTY
+    };
+    let cite_rect = Rect::new(
+        if back_w > 0 { bar_rect.x + back_w + gap } else { bar_rect.x },
+        bar_rect.y,
+        cite_w,
+        bh,
+    );
+    Some((bar_rect, back_rect, cite_rect, back_label, cite_label))
+}
+
+/// Hit-test the floating Zotero PDF bar: 0 = miss, 1 = Back, 2 = Cite, 3 = gap inside bar.
+fn zotero_bar_hit(a: &App, x: f32, y: f32) -> u8 {
+    let Some((bar_rect, back_rect, cite_rect, _, _)) = zotero_bar_layout(a) else {
+        return 0;
+    };
+    let (ix, iy) = (x as i32, y as i32);
+    if !rect_is_empty(back_rect) && rect_contains(back_rect, ix, iy) {
+        1
+    } else if !rect_is_empty(cite_rect) && rect_contains(cite_rect, ix, iy) {
+        2
+    } else if !rect_is_empty(bar_rect) && rect_contains(bar_rect, ix, iy) {
+        3
+    } else {
+        0
+    }
+}
+
+fn zotero_bar_draw(a: &mut App, dirty: Rect) {
+    let Some((bar_rect, back_rect, cite_rect, back_lbl, cite_lbl)) = zotero_bar_layout(a) else {
+        if let Some(s) = a.ed.as_deref_mut() {
+            s.zbar_rect = RECT_EMPTY;
+            s.zbar_back = RECT_EMPTY;
+            s.zbar_cite = RECT_EMPTY;
+        }
+        return;
+    };
+    let pressed = {
+        let s = ed(a);
+        s.zbar_rect = bar_rect;
+        s.zbar_back = back_rect;
+        s.zbar_cite = cite_rect;
+        s.zbar_pressed
+    };
+    if !rect_overlaps(dirty, bar_rect) {
+        return;
+    }
+    let clip = a.screen.clip;
+    canvas_set_clip(&mut a.screen, dirty);
+    let c = &mut a.screen;
+    if !rect_is_empty(back_rect) {
+        let st = if pressed == 1 { ButtonStyle::Selected } else { ButtonStyle::Plain };
+        ui_button(c, back_rect, IconKind::Back, &back_lbl, st);
+    }
+    if !rect_is_empty(cite_rect) {
+        let st = if pressed == 2 { ButtonStyle::Selected } else { ButtonStyle::Plain };
+        ui_button(c, cite_rect, IconKind::None, &cite_lbl, st);
+    }
+    a.screen.clip = clip;
+}
+
+/// Recompute and repaint the floating Zotero PDF bar (called after setting `a.zotero_return`).
+pub fn editor_zotero_bar_refresh(a: &mut App) {
+    if a.scr != ScreenId::Editor || !a.ed.as_deref().is_some_and(|s| s.open) {
+        return;
+    }
+    if let Some((bar_rect, back_rect, cite_rect, _, _)) = zotero_bar_layout(a) {
+        let s = ed(a);
+        s.zbar_rect = bar_rect;
+        s.zbar_back = back_rect;
+        s.zbar_cite = cite_rect;
+    } else {
+        let s = ed(a);
+        s.zbar_rect = RECT_EMPTY;
+        s.zbar_back = RECT_EMPTY;
+        s.zbar_cite = RECT_EMPTY;
+        s.zbar_pressed = 0;
+    }
+    compose_all(a, RefreshMode::Ui);
+}
+
+/// Screen center of a control on the floating Zotero PDF bar (`"back"`, `"cite"`, or `"bar"`).
+pub fn editor_zotero_bar_point(a: &App, name: &str) -> Option<(f32, f32)> {
+    let (bar_rect, back_rect, cite_rect, _, _) = zotero_bar_layout(a)?;
+    let r = match name {
+        "back" => back_rect,
+        "cite" => cite_rect,
+        "bar" => bar_rect,
+        _ => return None,
+    };
+    if rect_is_empty(r) {
+        None
+    } else {
+        Some(((r.x + r.w / 2) as f32, (r.y + r.h / 2) as f32))
+    }
 }
 
 /// Close the editor's Zotero sheet if open.
@@ -1212,14 +1751,20 @@ pub fn editor_zotero_set_status(a: &mut App, status: &str) {
     }
 }
 
-/// Programmatic control entry point for the editor's Zotero sheet.
+/// Programmatic control entry point for the editor's Zotero sheet and floating bar.
 pub fn editor_zotero_control(a: &mut App, key: &str, value: &str) -> bool {
     if a.scr != ScreenId::Editor || !a.ed.as_deref().is_some_and(|s| s.open) {
         return false;
     }
-    if key == "show" {
+    if key == "show" || key == "open_sheet" {
         zotero_show(a);
         return a.ed.as_deref().is_some_and(|s| s.zsheet.open);
+    }
+    if key == "bar.back" || key == "return" {
+        return crate::app::zotero_return_to_essay(a);
+    }
+    if key == "bar.cite" || key == "cite_page" {
+        return zotero_cite_current_page(a);
     }
     if !a.ed.as_deref().is_some_and(|s| s.zsheet.open) {
         return false;
@@ -2169,6 +2714,7 @@ pub fn editor_panel_point(a: &mut App, name: &str) -> Option<(f32, f32)> {
     if name=="elsewhere.current" {return s.destination.point(&format!("book.{}",s.nb.id));}
     if let Some(n)=name.strip_prefix("elsewhere."){return s.destination.point(n);}
     if let Some(control)=name.strip_prefix("select."){return sel_control_point(s,control);}
+    if let Some(control)=name.strip_prefix("zotero.bar."){return editor_zotero_bar_point(a,control);}
     if let Some(control)=name.strip_prefix("zotero."){return zotero_sheet_control_point(&s.zsheet,control);}
     if let Some(control)=name.strip_prefix("bar."){return linkbar_control_point(&s.lb,control);}
     if let Some(control)=name.strip_prefix("linkto."){return linkbar_control_point(&s.lt,control);}
@@ -3531,6 +4077,8 @@ fn draw_menus(a: &mut App, r: Rect) {
     }
     // Zotero citation badges live on the page and show whether or not the link areas are on.
     zotero_badges_draw(a, r);
+    // Floating Back-to-essay / 1-tap Cite bar on Zotero-bound PDF notebooks.
+    zotero_bar_draw(a, r);
     // The Find sheet's card of rows and keyboard, where r meets them.
     let s = ed_ref(a);
     if s.find.open {
@@ -4414,6 +4962,7 @@ fn go_to_page(a: &mut App, index: i32) -> bool {
         None => render_page_open(a),
     }
     view_reset(a);
+    record_last_essay(a);
     // A page at the fitted view (100% upright, no offset) is the screen whole, blitted in compose: a
     // partial (GL16) refresh rather than GC16's flash of the whole panel, which cost 147 ms on a light
     // page and 1250 ms on a dense one (issue #31). Another view (zoomed, another page size) is composed
@@ -4526,6 +5075,10 @@ fn close_notebook(a: &mut App) {
     }
     save_page_leaving(a);
     links_flush(a); // (before the PDF, which reads the areas)
+    if ed_ref(a).zl.dirty {
+        zotero_save(a);
+    }
+    record_last_essay(a);
     backlinks_flush();
     libindex_flush();
     write_thumb_if_needed(a);
@@ -4575,6 +5128,11 @@ fn close_notebook(a: &mut App) {
     s.dl = DocLinks::default();
     s.wl = WebLinks::default();
     s.zl.clear();
+    s.zotero_src = None;
+    s.zbar_rect = RECT_EMPTY;
+    s.zbar_back = RECT_EMPTY;
+    s.zbar_cite = RECT_EMPTY;
+    s.zbar_pressed = 0;
     zotero_sheet_close(&mut s.zsheet);
     s.links_dirty = false; // (what a failed flush kept is left for this notebook's next open)
     s.migrate_done = Vec::new();
@@ -4605,6 +5163,7 @@ pub fn editor_open_notebook(a: &mut App, id: &str) {
     backlinks_revalidate(); // (another notebook may have changed its links since: checked on idle ticks)
     libindex_revalidate(); // (and the Graph of all notebooks' index, for any notebook's files)
     close_notebook(a);
+    a.zotero_return = None;
     // Every way into a notebook comes here (the Library's card and its menu, a new notebook): its
     // compaction, queued or running, is stopped before anything here reads or writes its pages (a
     // stopped compaction leaves each page file as it was; the list keeps the pages for later).
@@ -4635,6 +5194,11 @@ pub fn editor_open_notebook(a: &mut App, id: &str) {
     s.wl = weblinks_load(s.nb.id.as_str());
     weblinks_prune(&mut s.wl, &s.nb);
     zotero_load(s);
+    s.zotero_src = crate::zotero_sync::zotero_source_load(s.nb.id.as_str());
+    s.zbar_rect = RECT_EMPTY;
+    s.zbar_back = RECT_EMPTY;
+    s.zbar_cite = RECT_EMPTY;
+    s.zbar_pressed = 0;
     // The page it opens at was read before its links were: its beta.5 links migrate now, before the
     // first tap.
     s.links_dirty = false;
@@ -4654,6 +5218,7 @@ pub fn editor_open_notebook(a: &mut App, id: &str) {
         return;
     }
     render_page_open(a);
+    record_last_essay(a);
     ed(a).view_w = 0; // set the view up afresh on enter
     app_switch(a, ScreenId::Editor);
     arrive_readonly(a);
@@ -5425,7 +5990,7 @@ pub fn editor_live_style(a: &App, ev: &InEvent, out: &mut LiveStyle) {
     if crate::library::library_settings_active(a) {return;}
     let Some(s) = a.ed.as_deref() else { return };
     let Some(page) = s.open_page() else { return };
-    if !s.open || pb_contact_bound(a, ev) || s.sh.preview.is_some() || page.readonly || sheet_open(s) || s.widgets.hit(ev.x.round_ties_even() as i32, ev.y.round_ties_even() as i32).is_some() || s.pinching || s.lm.state != LmState::Off || (s.owner != Owner::None && s.owner != Owner::Draw && s.owner != Owner::Erase) || editor_pen_not_ink(a) {
+    if !s.open || pb_contact_bound(a, ev) || s.sh.preview.is_some() || page.readonly || sheet_open(s) || zotero_bar_hit(a, ev.x, ev.y) != 0 || s.widgets.hit(ev.x.round_ties_even() as i32, ev.y.round_ties_even() as i32).is_some() || s.pinching || s.lm.state != LmState::Off || (s.owner != Owner::None && s.owner != Owner::Draw && s.owner != Owner::Erase) || editor_pen_not_ink(a) {
         return;
     }
     let st = &a.settings;
@@ -10016,6 +10581,7 @@ fn panel_act(a: &mut App, h: Hit) {
             // (a notebook the Library's Graph opened goes back to that Graph: the Library as it was left)
             let to_graph = ed_ref(a).from_graph;
             close_notebook(a);
+            a.zotero_return = None;
             ed(a).from_graph = false;
             if to_graph {
                 crate::library::library_return_to_graph(a);
@@ -11640,7 +12206,10 @@ pub fn editor_control_at(a: &App, x: f32, y: f32) -> bool {
     if !s.open || corner_sheet_open(s) {
         return true;
     }
-    if rect_contains(s.panel, x as i32, y as i32) || phase2_surface_at(s, x as i32, y as i32) {
+    if rect_contains(s.panel, x as i32, y as i32)
+        || phase2_surface_at(s, x as i32, y as i32)
+        || zotero_bar_hit(a, x, y) != 0
+    {
         return true;
     }
     if status_hit(a, x, y) {
@@ -12396,6 +12965,7 @@ fn editor_event_in(a: &mut App, ev: &InEvent) {
                 s.owner = Owner::Outside;
                 if pen {
                     with_modal(a, |s| &mut s.zsheet, |z, _| zotero_sheet_close(z));
+                    compose_all(a, RefreshMode::Ui);
                 } else {
                     press_begin(&mut s.link_press, ev.x, ev.y, ev.t_ms);
                 }
@@ -12582,11 +13152,15 @@ fn editor_event_in(a: &mut App, ev: &InEvent) {
             }
             s.owner = Owner::Modal;
             ui_pointer(a, 0, ev, true);
-        } else if (s.lm.state == LmState::Armed || s.lm.state == LmState::Lasso) && rect_contains(s.lm.strip, ev.x as i32, ev.y as i32) {
+            return;
+        }
+        if (s.lm.state == LmState::Armed || s.lm.state == LmState::Lasso) && rect_contains(s.lm.strip, ev.x as i32, ev.y as i32) {
             // The strip takes a finger or the pen: its Cancel, or nothing (never the lasso).
             s.owner = Owner::Strip;
             strip_pointer(a, 0, ev);
-        } else if rect_contains(s.panel, ev.x as i32, ev.y as i32) {
+            return;
+        }
+        if rect_contains(s.panel, ev.x as i32, ev.y as i32) {
             s.owner = Owner::Panel;
             // A stroke just ended: Undo/Clear may have become available, but the panel (and its
             // hit list) is only rebuilt at the settle. Settle now so the tap finds the live buttons.
@@ -12594,7 +13168,31 @@ fn editor_event_in(a: &mut App, ev: &InEvent) {
                 settle_now(a);
             }
             ui_pointer(a, 0, ev, false);
-        } else if let Some((index, part)) = s.widgets.hit(ev.x.round_ties_even() as i32, ev.y.round_ties_even() as i32) {
+            return;
+        }
+        let zbar_hit = zotero_bar_hit(a, ev.x, ev.y);
+        if zbar_hit != 0 {
+            if let Some((bar_rect, back_rect, cite_rect, _, _)) = zotero_bar_layout(a) {
+                let s = ed(a);
+                s.zbar_rect = bar_rect;
+                s.zbar_back = back_rect;
+                s.zbar_cite = cite_rect;
+                s.owner = Owner::ZoteroBar;
+                press_begin(&mut s.zbar_press, ev.x, ev.y, ev.t_ms);
+                s.zbar_pressed = if zbar_hit == 1 || zbar_hit == 2 { zbar_hit } else { 0 };
+                let btn = match s.zbar_pressed {
+                    1 => back_rect,
+                    2 => cite_rect,
+                    _ => RECT_EMPTY,
+                };
+                if !rect_is_empty(btn) {
+                    app_press_feedback(a, btn);
+                }
+                return;
+            }
+        }
+        let s = ed(a);
+        if let Some((index, part)) = s.widgets.hit(ev.x.round_ties_even() as i32, ev.y.round_ties_even() as i32) {
             widget_down(a, index, part, ev, pen);
         } else if s.lm.state == LmState::Off && sel_takes(s, pen, ev.x, ev.y) {
             // Select mode: the bar, a drag of the selection, or the pen's lasso (never ink).
@@ -12803,6 +13401,38 @@ fn owner_pointer(a: &mut App, ph: i32, ev: &InEvent, pen: bool) {
             }
             zotero_result(a, r, d);
         }
+        Owner::ZoteroBar => {
+            press_move(&mut s.zbar_press, ev.x, ev.y);
+            if ph != 2 {
+                return;
+            }
+            let pressed = s.zbar_pressed;
+            let press = s.zbar_press;
+            let btn = match pressed {
+                1 => s.zbar_back,
+                2 => s.zbar_cite,
+                _ => RECT_EMPTY,
+            };
+            s.zbar_pressed = 0;
+            s.owner = Owner::None;
+            if !rect_is_empty(btn) {
+                canvas_invert(&mut a.screen, btn);
+                app_invalidate(a, btn, RefreshMode::Fast);
+            }
+            if touch_cancelled(ev) || rect_is_empty(btn) || !press_is_tap(&press, btn) {
+                return;
+            }
+            match pressed {
+                1 => {
+                    crate::app::zotero_return_to_essay(a);
+                }
+                2 => {
+                    zotero_cite_current_page(a);
+                    compose_all(a, RefreshMode::Ui);
+                }
+                _ => {}
+            }
+        }
         Owner::Bar => {
             let mut d = RECT_EMPTY;
             let r = with_lb(a, |lb, a, _nb, _nav| linkbar_pointer(lb, a, ph, ev, &mut d));
@@ -12875,6 +13505,11 @@ fn owner_pointer(a: &mut App, ph: i32, ev: &InEvent, pen: bool) {
                 if !corner_tap(false) {
                     link_cancel(a);
                 }
+                return;
+            }
+            if ed_ref(a).zsheet.open {
+                with_modal(a, |s| &mut s.zsheet, |z, _| zotero_sheet_close(z));
+                compose_all(a, RefreshMode::Ui);
                 return;
             }
             if ed_ref(a).find.open {
@@ -13522,6 +14157,37 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
             "dirty" => { csnprintf!(out, cap, "%d", s.zl.dirty as i32); }
             "pending" => { csnprintf!(out, cap, "%d", crate::zotero_bridge::pending_citations().len() as i32); }
             "badges" => { csnprintf!(out, cap, "%d", crate::zotero_bridge::zoterolinks_of(&s.zl.links, pid).len() as i32); }
+            "bar" => { csnprintf!(out, cap, "%d", zotero_bar_visible(a) as i32); }
+            "bar.back" => {
+                match zotero_bar_layout(a) {
+                    Some((_, r, _, _, _)) if !rect_is_empty(r) => {
+                        csnprintf!(out, cap, "%d,%d,%d,%d", r.x, r.y, r.w, r.h);
+                    }
+                    _ => out.clear(),
+                }
+            }
+            "bar.cite" => {
+                match zotero_bar_layout(a) {
+                    Some((_, _, r, _, _)) if !rect_is_empty(r) => {
+                        csnprintf!(out, cap, "%d,%d,%d,%d", r.x, r.y, r.w, r.h);
+                    }
+                    _ => out.clear(),
+                }
+            }
+            "return" => {
+                if let Some(r) = a.zotero_return.as_ref() {
+                    csnprintf!(out, cap, "%s:%u:%u", r.notebook_id.as_str(), r.page_id, r.page_index);
+                } else {
+                    out.clear();
+                }
+            }
+            "source" => {
+                if let Some(src) = s.zotero_src.as_ref() {
+                    csnprintf!(out, cap, "%s:%s", src.item_key.as_str(), src.attachment_key.as_str());
+                } else {
+                    out.clear();
+                }
+            }
             _ => {
                 let n = k.strip_prefix("badge.").and_then(|x| x.split_once('.')).and_then(|(n, _)| n.parse::<usize>().ok()).and_then(|n| n.checked_sub(1));
                 if let Some(n) = n {
@@ -13914,6 +14580,10 @@ pub fn editor_probe(a: &mut App, key: &str, out: &mut String, cap: usize) -> i32
         let strip = here && (s.lm.state == LmState::Armed || s.lm.state == LmState::Lasso);
         let name = if here && s.zsheet.open {
             zotero_sheet_hit_name(&s.zsheet, x, y)
+        } else if here && zotero_bar_hit(a, x as f32, y as f32) == 1 {
+            "zotero.bar.back".to_string()
+        } else if here && zotero_bar_hit(a, x as f32, y as f32) == 2 {
+            "zotero.bar.cite".to_string()
         } else if here && zotero_badge_under(a, x as f32, y as f32).is_some() {
             "zotero.badge".to_string()
         } else if here && s.card.open {

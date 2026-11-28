@@ -179,6 +179,18 @@ pub struct App {
     pub asked: Asked,
     /// In-flight Zotero PDF inspection/fetch/import queued from ZoteroView or ZoteroSheet.
     pub zotero_import: Option<ZoteroPendingImport>,
+    /// Active return-to-essay context when a Zotero-bound PDF was opened from an essay notebook.
+    pub zotero_return: Option<ZoteroReturnContext>,
+    /// Most recently viewed non-Zotero (essay) notebook page, used as a fallback target for 1-tap Cite.
+    pub last_essay: Option<ZoteroReturnContext>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ZoteroReturnContext {
+    pub notebook_id: String,
+    pub page_id: u32,
+    pub page_index: u32,
+    pub notebook_title: String,
 }
 
 #[derive(Clone, Debug)]
@@ -198,6 +210,7 @@ pub struct ZoteroPendingImport {
     pub item: crate::zotero_bridge::ZoteroLibraryItem,
     pub page: u32,
     pub return_to: Option<crate::zotero_bridge::ReturnPlace>,
+    pub return_ctx: Option<ZoteroReturnContext>,
     pub phase: ZoteroImportPhase,
 }
 
@@ -239,7 +252,7 @@ pub use crate::calibrate::calibrate_open;
 pub use crate::editor::{
     editor_busy, editor_control_at, editor_fit_changed, editor_hold_eraser, editor_modal_key, editor_live_chip, editor_live_hole, editor_live_panel, editor_live_style, editor_live_under_panel, editor_open_notebook,
     editor_open_notebook_at, editor_page_canvas, editor_page_in_front, editor_panel_point, editor_picture_made, editor_pin_sleep_page, editor_probe, editor_save_now,
-    editor_shortcut, editor_shortcut_at, editor_suspend,
+    editor_shortcut, editor_shortcut_at, editor_suspend, editor_zotero_bar_point,
 };
 pub use crate::library::{library_bt, library_learn_key, library_probe};
 pub use crate::pensettings::{pensettings_open, pensettings_probe, pensettings_shortcut};
@@ -2179,20 +2192,94 @@ pub fn app_import_rescan(a: &mut App, entering: bool) {
     import_scan(a.dpi);
 }
 
-fn open_zotero_notebook(a: &mut App, nb_id: &str, page_one_based: u32) {
+fn resolve_zotero_return_context(
+    a: &App,
+    return_to: Option<&crate::zotero_bridge::ReturnPlace>,
+) -> Option<ZoteroReturnContext> {
+    let place = return_to?;
+    if place.notebook_id.is_empty() {
+        return None;
+    }
+    // Multi-hop safety: jumping from a Zotero-bound PDF to another PDF keeps the original essay.
+    if crate::zotero_sync::zotero_source_load(&place.notebook_id).is_some() {
+        return a.zotero_return.clone();
+    }
+    let notebook_title = crate::editor::editor_open_notebook_title(a, &place.notebook_id)
+        .unwrap_or_else(|| {
+            let mut nb = NotebookInfo::default();
+            if store_load_info(&place.notebook_id, &mut nb) == 0 {
+                nb.name.to_string()
+            } else {
+                String::new()
+            }
+        });
+    Some(ZoteroReturnContext {
+        notebook_id: place.notebook_id.clone(),
+        page_id: place.page_id,
+        page_index: place.page_index,
+        notebook_title,
+    })
+}
+
+fn open_zotero_notebook(
+    a: &mut App,
+    nb_id: &str,
+    page_one_based: u32,
+    return_ctx: Option<ZoteroReturnContext>,
+) {
     app_notice_clear(a, NoticeKey::Zotero);
     crate::library::library_close_zotero_modal(a);
     crate::editor::editor_close_zotero_sheet(a);
+    let mut opened_at = false;
     if page_one_based > 0 {
         let mut nb = NotebookInfo::default();
-        if store_load_info(nb_id, &mut nb) == 0 {
-            if let Some(&pid) = nb.page_ids.get((page_one_based - 1) as usize) {
-                editor_open_notebook_at(a, nb_id, pid, false);
-                return;
-            }
+        if store_load_info(nb_id, &mut nb) == 0 && !nb.page_ids.is_empty() {
+            let clamped = (page_one_based as usize).clamp(1, nb.page_ids.len());
+            let pid = nb.page_ids[clamped - 1];
+            editor_open_notebook_at(a, nb_id, pid, false);
+            opened_at = true;
         }
     }
-    editor_open_notebook(a, nb_id);
+    if !opened_at {
+        editor_open_notebook(a, nb_id);
+    }
+    if crate::editor::editor_has_open(a, nb_id) {
+        a.zotero_return = return_ctx.filter(|ctx| ctx.notebook_id != nb_id);
+        crate::editor::editor_zotero_bar_refresh(a);
+    }
+}
+
+/// Immediately open an already-bound Zotero PDF notebook in Grimoire (zero `zk-sync`, zero exit-42),
+/// clamping any requested 1-based page into bounds and recording the return-to-essay context.
+pub fn zotero_open_bound_notebook(
+    a: &mut App,
+    nb_id: &str,
+    page_one_based: u32,
+    return_to: Option<crate::zotero_bridge::ReturnPlace>,
+) {
+    let return_ctx = resolve_zotero_return_context(a, return_to.as_ref());
+    open_zotero_notebook(a, nb_id, page_one_based, return_ctx);
+}
+
+/// Return directly to the essay notebook page recorded in `a.zotero_return`.
+pub fn zotero_return_to_essay(a: &mut App) -> bool {
+    let Some(ret) = a.zotero_return.take() else {
+        return false;
+    };
+    let mut nb = NotebookInfo::default();
+    if store_load_info(&ret.notebook_id, &mut nb) != 0 || nb.page_ids.is_empty() {
+        app_toast(a, "Couldn't open return notebook.", 3000);
+        return false;
+    }
+    let pid = if ret.page_id != 0 && nb.page_ids.contains(&ret.page_id) {
+        ret.page_id
+    } else {
+        nb.page_ids[(ret.page_index as usize).min(nb.page_ids.len() - 1)]
+    };
+    crate::editor::zotero_save(a);
+    editor_open_notebook_at(a, &ret.notebook_id, pid, false);
+    a.zotero_return = None;
+    crate::editor::editor_has_open(a, &ret.notebook_id)
 }
 
 fn zotero_import_src(a: &App) -> Option<String> {
@@ -2223,10 +2310,11 @@ fn zotero_begin_pdf_import(
     item: crate::zotero_bridge::ZoteroLibraryItem,
     page: u32,
     return_to: Option<crate::zotero_bridge::ReturnPlace>,
+    return_ctx: Option<ZoteroReturnContext>,
     info: crate::zotero_sync::ZkPdfInfo,
 ) {
-    if let Some(nb_id) = crate::zotero_sync::find_notebook_by_attachment_key(&info.attachment_key) {
-        open_zotero_notebook(a, &nb_id, page);
+    if let Some(nb_id) = crate::zotero_sync::find_bound_notebook(&info.attachment_key, &item.item_key) {
+        open_zotero_notebook(a, &nb_id, page, return_ctx);
         return;
     }
     let sp = match crate::zotero_sync::zotero_pdf_storage_path(&info) {
@@ -2260,6 +2348,7 @@ fn zotero_begin_pdf_import(
                 item,
                 page,
                 return_to,
+                return_ctx,
                 phase: ZoteroImportPhase::Importing {
                     job_id,
                     src: src_str,
@@ -2276,6 +2365,7 @@ fn zotero_begin_pdf_import(
                 item,
                 page,
                 return_to,
+                return_ctx,
                 phase: ZoteroImportPhase::Importing {
                     job_id: String::new(),
                     src: src_str,
@@ -2366,14 +2456,14 @@ fn zotero_import_end(a: &mut App, id: &str, fin: crate::pdfimport::Finished) {
                     qlog!("zotero: could not write zotero_source.json for %s: %s", &nb_id, &e);
                 }
             }
-            open_zotero_notebook(a, &nb_id, pending.page);
+            open_zotero_notebook(a, &nb_id, pending.page, pending.return_ctx);
         }
     }
 }
 
 /// Unified Zotero item open entry point (Library `ZoteroView` & Editor `ZoteroSheet`):
 /// - Non-PDF attachments (EPUB, Web Snapshot, metadata-only) fall back cleanly to Zotero via exit-42 handoff.
-/// - Already-bound PDF attachments (`find_notebook_by_attachment_key`) reopen the existing Grimoire notebook
+/// - Already-bound PDF attachments (`find_bound_notebook`) reopen the existing Grimoire notebook
 ///   directly (preserving `last_page` when `page == 0`, or jumping to 1-based `page` when specified).
 /// - Unbound PDF attachments inspect/fetch via background `zk-sync pdf-info` (`--fetch` when uncached),
 ///   import through Grimoire's multi-page `pdfimport` pipeline, bind `zotero_source.json`, and open in Editor.
@@ -2383,6 +2473,15 @@ pub fn zotero_open_item(
     page: u32,
     return_to: Option<crate::zotero_bridge::ReturnPlace>,
 ) {
+    let return_ctx = resolve_zotero_return_context(a, return_to.as_ref());
+
+    if item.has_pdf {
+        if let Some(nb_id) = crate::zotero_sync::find_bound_notebook(&item.attachment_key, &item.item_key) {
+            open_zotero_notebook(a, &nb_id, page, return_ctx);
+            return;
+        }
+    }
+
     if !item.has_pdf || item.attachment_key.is_empty() {
         if crate::zotero_bridge::app_request_zotero_handoff(
             a,
@@ -2395,11 +2494,6 @@ pub fn zotero_open_item(
         {
             app_toast(a, "Couldn't hand off to Zotero.", 3000);
         }
-        return;
-    }
-
-    if let Some(nb_id) = crate::zotero_sync::find_notebook_by_attachment_key(&item.attachment_key) {
-        open_zotero_notebook(a, &nb_id, page);
         return;
     }
 
@@ -2419,6 +2513,7 @@ pub fn zotero_open_item(
                 item: item.clone(),
                 page,
                 return_to,
+                return_ctx,
                 phase: ZoteroImportPhase::FetchingInfo {
                     fetch_attempted: fetch,
                 },
@@ -2449,7 +2544,7 @@ pub fn zotero_open_item(
             page_count: 0,
             pages: Vec::new(),
         };
-        zotero_begin_pdf_import(a, item.clone(), page, return_to, fallback_info);
+        zotero_begin_pdf_import(a, item.clone(), page, return_to, return_ctx, fallback_info);
     } else if crate::zotero_bridge::app_request_zotero_handoff(
         a,
         &item.item_key,
@@ -2501,18 +2596,19 @@ fn zotero_tick(a: &mut App) {
         }
         ZkBgDone::PdfInfo { item, result } => {
             let pending = a.zotero_import.take();
-            let (page, return_to, fetch_attempted) = match pending {
+            let (page, return_to, return_ctx, fetch_attempted) = match pending {
                 Some(ZoteroPendingImport {
                     page,
                     return_to,
+                    return_ctx,
                     phase: ZoteroImportPhase::FetchingInfo { fetch_attempted },
                     ..
-                }) => (page, return_to, fetch_attempted),
+                }) => (page, return_to, return_ctx, fetch_attempted),
                 Some(other) => {
                     a.zotero_import = Some(other);
-                    (0, None, true)
+                    (0, None, None, true)
                 }
-                None => (0, None, true),
+                None => (0, None, None, true),
             };
             match result {
                 Err(err) => {
@@ -2538,6 +2634,7 @@ fn zotero_tick(a: &mut App) {
                                 item,
                                 page,
                                 return_to,
+                                return_ctx,
                                 phase: ZoteroImportPhase::FetchingInfo {
                                     fetch_attempted: true,
                                 },
@@ -2553,7 +2650,7 @@ fn zotero_tick(a: &mut App) {
                             app_toast(a, msg, 5000);
                         }
                     } else {
-                        zotero_begin_pdf_import(a, item, page, return_to, info);
+                        zotero_begin_pdf_import(a, item, page, return_to, return_ctx, info);
                     }
                 }
             }

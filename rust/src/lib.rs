@@ -223,6 +223,7 @@ pub mod prelude {
     pub use crate::pdflinks::*;
     pub use crate::weblinks::*;
     pub use crate::zotero_bridge::*;
+    pub use crate::zotero_bridge::ZoteroReturnContext;
     pub use crate::zotero_sync::*;
     pub use crate::zotero_sheet::*;
     pub use crate::zotero_view::*;

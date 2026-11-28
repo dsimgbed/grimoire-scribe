@@ -1352,6 +1352,144 @@ pub fn find_notebook_by_attachment_key(attachment_key: &str) -> Option<String> {
     None
 }
 
+/// Find the newest valid notebook bound to `item_key` via `zotero_source.json`.
+/// Uses `store_list`, so trashed notebooks and incomplete `.import-*` directories are ignored.
+pub fn find_notebook_by_item_key(item_key: &str) -> Option<String> {
+    if !valid_cli_attachment_key(item_key) {
+        return None;
+    }
+    let mut notebooks = Vec::new();
+    if store_list(&mut notebooks) != 0 {
+        return None;
+    }
+    for nb in &notebooks {
+        let id = nb.id.as_str();
+        if let Some(src) = zotero_source_load(id) {
+            if src.item_key == item_key {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Find a bound Grimoire notebook by `attachment_key` first, falling back to `item_key`.
+pub fn find_bound_notebook(attachment_key: &str, item_key: &str) -> Option<String> {
+    if !attachment_key.is_empty() {
+        if let Some(id) = find_notebook_by_attachment_key(attachment_key) {
+            return Some(id);
+        }
+    }
+    if !item_key.is_empty() {
+        if let Some(id) = find_notebook_by_item_key(item_key) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn truncate_utf8_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Resolve the display page label for a 1-based page number on a Zotero-bound PDF notebook.
+/// Strips ASCII control characters (`< 0x20` and `0x7f`), trims whitespace, and caps at 64 UTF-8 bytes.
+pub fn zotero_source_page_label(src: &ZoteroNotebookSource, page_one_based: u32) -> String {
+    let p = page_one_based.max(1);
+    let pg = src
+        .pages
+        .iter()
+        .find(|pg| pg.page_index + 1 == p)
+        .or_else(|| src.pages.get((p - 1) as usize));
+    if let Some(pg) = pg {
+        let cleaned: String = pg
+            .page_label
+            .chars()
+            .filter(|&c| (c as u32) >= 0x20 && (c as u32) != 0x7f)
+            .collect();
+        let trimmed = cleaned.trim();
+        if !trimmed.is_empty() {
+            let capped = truncate_utf8_bytes(trimmed, 64).trim_end();
+            if !capped.is_empty() {
+                return capped.to_string();
+            }
+        }
+    }
+    p.to_string()
+}
+
+fn collapse_controls_and_trim(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = true;
+    for ch in s.chars() {
+        if ch == '\0' {
+            continue;
+        }
+        if (ch as u32) < 0x20 || (ch as u32) == 0x7f || ch.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Build a bounded short citation label (<= 250 UTF-8 bytes) for a Zotero-bound PDF notebook page.
+pub fn zotero_source_short_cite(src: &ZoteroNotebookSource, page_one_based: u32) -> String {
+    let base_raw = if !src.citation_key.trim().is_empty() {
+        src.citation_key.trim().to_string()
+    } else if !src.authors.trim().is_empty() && !src.year.trim().is_empty() {
+        format!("{} {}", src.authors.trim(), src.year.trim())
+    } else if !src.authors.trim().is_empty() {
+        src.authors.trim().to_string()
+    } else if !src.title.trim().is_empty() {
+        let clean_title = collapse_controls_and_trim(&src.title);
+        if clean_title.chars().count() > 44 {
+            let prefix: String = clean_title.chars().take(41).collect();
+            format!("{}...", prefix.trim_end())
+        } else {
+            clean_title
+        }
+    } else if !src.item_key.trim().is_empty() {
+        src.item_key.trim().to_string()
+    } else {
+        src.attachment_key.trim().to_string()
+    };
+
+    let base = collapse_controls_and_trim(&base_raw);
+    let combined = if page_one_based > 0 {
+        let label = zotero_source_page_label(src, page_one_based);
+        let suffix = format!(", p. {label}");
+        if base.is_empty() {
+            format!("p. {label}")
+        } else if base.len() + suffix.len() <= 250 {
+            format!("{base}{suffix}")
+        } else {
+            let avail = 250usize.saturating_sub(suffix.len());
+            let cut = truncate_utf8_bytes(&base, avail).trim_end();
+            if cut.is_empty() {
+                format!("p. {label}")
+            } else {
+                format!("{cut}{suffix}")
+            }
+        }
+    } else {
+        base
+    };
+    truncate_utf8_bytes(&combined, 250).trim_end().to_string()
+}
+
 /// Whether `item` points to an already-cached regular (non-symlink) PDF file on local disk.
 pub fn zotero_pdf_on_disk(item: &ZoteroLibraryItem) -> bool {
     item.has_pdf
