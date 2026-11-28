@@ -216,6 +216,14 @@ koplugin() {
 }
 koplugin
 
+# Bridge copy (GRIMOIRE_DEV=1) tapped directly in the Kindle Library: route through the
+# Grimoire x Zotero trampoline so exit-42/43 handoffs switch apps instead of returning Home.
+GZ_TRAMPOLINE=${GZ_TRAMPOLINE:-/mnt/us/documents/Grimoire x Zotero.sh}
+if [ "${GRIMOIRE_DEV:-}" = 1 ] && [ "${GZ_UNDER_TRAMPOLINE:-0}" != 1 ] && [ -z "$1" ] \
+    && [ -f "$GZ_TRAMPOLINE" ]; then
+    exec sh "$GZ_TRAMPOLINE" --start grimoire
+fi
+
 # Detach, so Grimoire keeps running whatever the scriptlet host does with this process.
 if command -v setsid >/dev/null 2>&1; then
     setsid sh "$APP/grimoire.sh" "$@" </dev/null >/dev/null 2>&1 &
