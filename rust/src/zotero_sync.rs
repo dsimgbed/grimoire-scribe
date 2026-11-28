@@ -1073,6 +1073,9 @@ pub struct InkSyncJob {
     pub state: InkSyncState,
     pub local: Vec<LocalBucket>,
     pub fresh_stamps: Vec<PageStamp>,
+    /// The notebook's directory, resolved on the main thread (the store root is per thread): where a background
+    /// run writes zotero_ink_sync.json. Empty = resolve from nb_id (only works on the store's own thread).
+    pub nb_dir: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1164,7 +1167,12 @@ pub fn run_ink_sync(job: InkSyncJob) -> Result<InkSyncOutcome, ZkSyncError> {
     st.last_sync_ms = now;
     summary.offline = offline;
     summary.pushed = pushed;
-    let save_error = ink_sync_save(&job.nb_id, &st).err().map(|e| scrub_error_message(&e));
+    let saved = if job.nb_dir.is_empty() {
+        ink_sync_save(&job.nb_id, &st)
+    } else {
+        crate::zotero_ink::ink_sync_save_in_dir(&job.nb_dir, &st)
+    };
+    let save_error = saved.err().map(|e| scrub_error_message(&e));
     Ok(InkSyncOutcome { nb_id: job.nb_id, state: st, summary, save_error })
 }
 

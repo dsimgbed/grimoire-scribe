@@ -1623,7 +1623,10 @@ fn zotero_ink_sync_job(a: &mut App) -> Result<crate::zotero_sync::InkSyncJob, St
         local.extend(buckets);
     }
     state.page_stamps.retain(|ps| live.contains(&ps.page_id));
+    let nb_dir = crate::zotero_sync::notebook_dir_verified(s.nb.id.as_str())
+        .map_err(|e| format!("Couldn't find the notebook folder: {e}"))?;
     Ok(crate::zotero_sync::InkSyncJob {
+        nb_dir,
         nb_id: s.nb.id.to_string(),
         attachment_key: src.attachment_key.clone(),
         state,

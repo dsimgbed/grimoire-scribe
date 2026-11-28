@@ -864,8 +864,18 @@ pub fn ink_sync_load(nb_id: &str) -> Option<InkSyncState> {
 
 pub fn ink_sync_save(nb_id: &str, s: &InkSyncState) -> Result<(), String> {
     let dir = crate::zotero_sync::notebook_dir_verified(nb_id)?;
+    ink_sync_save_in_dir(&dir, s)
+}
+
+/// ink_sync_save into a notebook directory resolved earlier (`notebook_dir_verified` on the main thread): the
+/// store's root is per thread, so a background sync cannot resolve it itself. The directory must still exist
+/// and not be a symlink.
+pub fn ink_sync_save_in_dir(dir: &str, s: &InkSyncState) -> Result<(), String> {
+    if dir.is_empty() || !crate::zotero_bridge::check_dir_existing(dir) {
+        return Err("notebook directory does not exist or is a symlink".to_string());
+    }
     let doc = serialize_ink_sync_state(s)?;
-    crate::zotero_sync::write_atomic_in_existing_dir(&dir, ZOTERO_INK_SYNC_FILE, doc.as_bytes())
+    crate::zotero_sync::write_atomic_in_existing_dir(dir, ZOTERO_INK_SYNC_FILE, doc.as_bytes())
 }
 
 pub fn local_buckets_from_stamp(st: &PageStamp) -> Vec<LocalBucket> {

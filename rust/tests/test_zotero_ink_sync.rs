@@ -845,6 +845,42 @@ fn test_6_offline(a: &mut App, mock: &Mock) {
 // Test 7: layout invariants + screenshots (Gothic / Classic)
 // ---------------------------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------------------------
+// Test 8: the real path: a finger tap on [Sync] runs the sync on the background worker thread (whose
+// store root is not the main thread's) and app_tick delivers it. Regression for the live Kindle run, where
+// zotero_ink_sync.json was not written ("store root is not initialized").
+// ---------------------------------------------------------------------------------------------
+
+fn test_8_background_sync_tap(a: &mut App, mock: &Mock) {
+    mock.reset(SEED_EMPTY);
+    let nb = make_pdf_nb("Ink Background", "ATTINK08", 2, 0x801);
+    open_nb(a, &nb);
+    draw_sample_ink(a, 700.0, 1);
+    let Some((sx, sy)) = editor_zotero_bar_point(a, "sync") else {
+        check!(false);
+        return;
+    };
+    app_toast_dismiss(a);
+    zk_bg_reset();
+    let t = now_ms();
+    contact(a, InType::TouchDown, sx, sy, t);
+    contact(a, InType::TouchUp, sx, sy, t.wrapping_add(60));
+    app_flush(a);
+    check!(probe_n(a, "editor.zotero.ink.busy") == 1);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while probe_n(a, "editor.zotero.ink.busy") == 1 && std::time::Instant::now() < deadline {
+        app_tick(a, now_ms());
+        app_flush(a);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    check!(probe_n(a, "editor.zotero.ink.busy") == 0);
+    let toast = probe(a, "toast");
+    check!(toast.contains("synced") && !toast.contains("not saved"));
+    check!(mock.count("ink-upsert") == 1);
+    let st = ink_sync_load(nb.id.as_str());
+    check!(st.as_ref().is_some_and(|s| s.local.len() == 1 && s.attachment_key == "ATTINK08"));
+}
+
 fn test_7_bar_layout_and_screenshots(a: &mut App, mock: &Mock) {
     // The sync toasts' arrows and dash must exist in every UI face (no tofu on the Scribe).
     for face in [FontFace::Regular, FontFace::Bold, FontFace::Caps] {
@@ -977,6 +1013,7 @@ fn main() {
     run_test("test_5_conflict", || test_5_conflict(&mut a, &mock));
     run_test("test_6_offline", || test_6_offline(&mut a, &mock));
     run_test("test_7_bar_layout_and_screenshots", || test_7_bar_layout_and_screenshots(&mut a, &mock));
+    run_test("test_8_background_sync_tap", || test_8_background_sync_tap(&mut a, &mock));
 
     font_set_overflow_hook(None);
     let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
